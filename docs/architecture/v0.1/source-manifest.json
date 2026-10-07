@@ -1,0 +1,315 @@
+{
+  "schema_version": 1,
+  "accessed_date": "2026-10-07",
+  "scope": "Listed files only. No repository execution or dependency audit. Local hashes identify cached text; pin a tested whole-repository llama.cpp commit before installation.",
+  "files": [
+    {
+      "repository": "Microck/discord.py-self-mcp",
+      "source_path": "discord_py_self_mcp/bot.py",
+      "source_ref": "625c40df34c42384bdff9b7355fcfef585288768",
+      "ref_is_pinned_commit": true,
+      "source_url": "https://github.com/Microck/discord.py-self-mcp/blob/625c40df34c42384bdff9b7355fcfef585288768/discord_py_self_mcp/bot.py",
+      "local_evidence_sha256": "77fc1809b4335e5d93b30c08c46d0ba30fe2e31b1668f50f15522cb9f860c736",
+      "local_evidence_bytes": 3896,
+      "local_content_git_blob_sha": "28fa7fdd8b79db082539ca9a900a51dbc78db6f7"
+    },
+    {
+      "repository": "Microck/discord.py-self-mcp",
+      "source_path": "discord_py_self_mcp/tools/interactions.py",
+      "source_ref": "625c40df34c42384bdff9b7355fcfef585288768",
+      "ref_is_pinned_commit": true,
+      "source_url": "https://github.com/Microck/discord.py-self-mcp/blob/625c40df34c42384bdff9b7355fcfef585288768/discord_py_self_mcp/tools/interactions.py",
+      "local_evidence_sha256": "97ec34837151f7fce6203812b3f56f260c6b62673c83d0f456a958f5a21ab07e",
+      "local_evidence_bytes": 38430,
+      "local_content_git_blob_sha": "0fdcdbd0a5a183931b9579c9a16dac9cabc55518"
+    },
+    {
+      "repository": "Microck/discord.py-self-mcp",
+      "source_path": "scripts/daemon.py",
+      "source_ref": "625c40df34c42384bdff9b7355fcfef585288768",
+      "ref_is_pinned_commit": true,
+      "source_url": "https://github.com/Microck/discord.py-self-mcp/blob/625c40df34c42384bdff9b7355fcfef585288768/scripts/daemon.py",
+      "local_evidence_sha256": "35aebd2ffe7acd6339082f5df216402c0108e91de9aa1b9097add489b40b847f",
+      "local_evidence_bytes": 30517,
+      "local_content_git_blob_sha": "0eef6d77379b1af137aa7e69be968aa68195da84"
+    },
+    {
+      "repository": "NousResearch/hermes-agent",
+      "source_path": "gateway/platforms/base.py",
+      "source_ref": "7dab93b06e2bb3757dc18229169efcee1b5b47a3",
+      "ref_is_pinned_commit": true,
+      "source_url": "https://github.com/NousResearch/hermes-agent/blob/7dab93b06e2bb3757dc18229169efcee1b5b47a3/gateway/platforms/base.py",
+      "local_evidence_sha256": "ef5cf004afd2dc25eca35f4be6eb4f55e26223469aa3e625929aefcacc27773c",
+      "local_evidence_bytes": 278948,
+      "local_content_git_blob_sha": "8d8663abd4c8a3b96882ccb50ebbd92f3c0d7e6a"
+    },
+    {
+      "repository": "NousResearch/hermes-agent",
+      "source_path": "gateway/session.py",
+      "source_ref": "7dab93b06e2bb3757dc18229169efcee1b5b47a3",
+      "ref_is_pinned_commit": true,
+      "source_url": "https://github.com/NousResearch/hermes-agent/blob/7dab93b06e2bb3757dc18229169efcee1b5b47a3/gateway/session.py",
+      "local_evidence_sha256": "247c94ae1516017abfcfee60f727e3206f65cedd7e99570e74d147b704a18e68",
+      "local_evidence_bytes": 66863,
+      "local_content_git_blob_sha": "6d30b9d0e10cd0e0413ebc6cf6504030854dfe57"
+    },
+    {
+      "repository": "NousResearch/hermes-agent",
+      "source_path": "plugins/platforms/discord/adapter.py",
+      "source_ref": "7dab93b06e2bb3757dc18229169efcee1b5b47a3",
+      "ref_is_pinned_commit": true,
+      "source_url": "https://github.com/NousResearch/hermes-agent/blob/7dab93b06e2bb3757dc18229169efcee1b5b47a3/plugins/platforms/discord/adapter.py",
+      "local_evidence_sha256": "69c9e76a5284698da9c2181a5c5db2dbfb3b6d9a92375802e74b7d1e3dc231d1",
+      "local_evidence_bytes": 386560,
+      "local_content_git_blob_sha": "da0f1166e80c7a7d013c32f080b8fff3cd6a29c9"
+    },
+    {
+      "repository": "NousResearch/hermes-agent",
+      "source_path": "tools/memory_tool_store.py",
+      "source_ref": "7dab93b06e2bb3757dc18229169efcee1b5b47a3",
+      "ref_is_pinned_commit": true,
+      "source_url": "https://github.com/NousResearch/hermes-agent/blob/7dab93b06e2bb3757dc18229169efcee1b5b47a3/tools/memory_tool_store.py",
+      "local_evidence_sha256": "dfa0105ce69e88dd6e3f141b3022af414077364c6be0d6b2bd00595b57f97016",
+      "local_evidence_bytes": 35751,
+      "local_content_git_blob_sha": "2de5759af20e469808c4f075c55ae241c5305b72"
+    },
+    {
+      "repository": "Terminally-Online/discord-agent",
+      "source_path": "src/daemon/brain.ts",
+      "source_ref": "b4fbede75d7b89c8529a4a7ca9be99a9842e180a",
+      "ref_is_pinned_commit": true,
+      "source_url": "https://github.com/Terminally-Online/discord-agent/blob/b4fbede75d7b89c8529a4a7ca9be99a9842e180a/src/daemon/brain.ts",
+      "local_evidence_sha256": "2e4e338d047088aee03d7864d71e597aee8b98ba903925ccc0b7aaea5312348b",
+      "local_evidence_bytes": 3165,
+      "local_content_git_blob_sha": "7fb95f8d55aecd9f71d2883108bbfc6cf67116e7"
+    },
+    {
+      "repository": "Terminally-Online/discord-agent",
+      "source_path": "src/daemon/classifier.ts",
+      "source_ref": "b4fbede75d7b89c8529a4a7ca9be99a9842e180a",
+      "ref_is_pinned_commit": true,
+      "source_url": "https://github.com/Terminally-Online/discord-agent/blob/b4fbede75d7b89c8529a4a7ca9be99a9842e180a/src/daemon/classifier.ts",
+      "local_evidence_sha256": "c65f5c87ddef50e1115c714efbdf9904a4f8aa8dbfd19203c7b9ae0dcb51cdaa",
+      "local_evidence_bytes": 5781,
+      "local_content_git_blob_sha": "de678aaedc984b53464748e11a88fcf6663717fd"
+    },
+    {
+      "repository": "Terminally-Online/discord-agent",
+      "source_path": "src/daemon/context.ts",
+      "source_ref": "b4fbede75d7b89c8529a4a7ca9be99a9842e180a",
+      "ref_is_pinned_commit": true,
+      "source_url": "https://github.com/Terminally-Online/discord-agent/blob/b4fbede75d7b89c8529a4a7ca9be99a9842e180a/src/daemon/context.ts",
+      "local_evidence_sha256": "09d4bd57124c5229daf2c867bb615eb4f87be9c7bd13eed8a566f9902766682a",
+      "local_evidence_bytes": 685,
+      "local_content_git_blob_sha": "0b39259f1e53849a8dfe7c3ed5dc74633265a8db"
+    },
+    {
+      "repository": "Terminally-Online/discord-agent",
+      "source_path": "src/daemon/router.ts",
+      "source_ref": "b4fbede75d7b89c8529a4a7ca9be99a9842e180a",
+      "ref_is_pinned_commit": true,
+      "source_url": "https://github.com/Terminally-Online/discord-agent/blob/b4fbede75d7b89c8529a4a7ca9be99a9842e180a/src/daemon/router.ts",
+      "local_evidence_sha256": "f8fd4eb4bd5dc1b1dd08331db382f6a2444c13e1147c1988d4219e7476c2bab7",
+      "local_evidence_bytes": 23957,
+      "local_content_git_blob_sha": "f2fbb777b83f049dec4c1cc12df0554668cb35c4"
+    },
+    {
+      "repository": "caesarnine/discord-agent-gateway",
+      "source_path": "discord_agent_gateway/api/agent_routes.py",
+      "source_ref": "88f93215a2def920ad148e8390b0189a29f52e5d",
+      "ref_is_pinned_commit": true,
+      "source_url": "https://github.com/caesarnine/discord-agent-gateway/blob/88f93215a2def920ad148e8390b0189a29f52e5d/discord_agent_gateway/api/agent_routes.py",
+      "local_evidence_sha256": "7040b0dbc9c5e365625e9cd8764ab51f2afff2231cb4f4f05a28eea270c7e15e",
+      "local_evidence_bytes": 8688,
+      "local_content_git_blob_sha": "0f199666f074499065fe6e251623055c51b79bfb"
+    },
+    {
+      "repository": "caesarnine/discord-agent-gateway",
+      "source_path": "discord_agent_gateway/db.py",
+      "source_ref": "88f93215a2def920ad148e8390b0189a29f52e5d",
+      "ref_is_pinned_commit": true,
+      "source_url": "https://github.com/caesarnine/discord-agent-gateway/blob/88f93215a2def920ad148e8390b0189a29f52e5d/discord_agent_gateway/db.py",
+      "local_evidence_sha256": "dd617feea5c8277f530808c996c8b4cf6dbcca51976e7401218209af14c86b7e",
+      "local_evidence_bytes": 23220,
+      "local_content_git_blob_sha": "af380aea315eb4b3689a308d9fed9d55e4889a91"
+    },
+    {
+      "repository": "cappyeo/discord-mcp",
+      "source_path": "packages/mcp-core/src/pipeline/executor.ts",
+      "source_ref": "7ed828f9979f261fbb3ce94c440a8f46c28b5716",
+      "ref_is_pinned_commit": true,
+      "source_url": "https://github.com/cappyeo/discord-mcp/blob/7ed828f9979f261fbb3ce94c440a8f46c28b5716/packages/mcp-core/src/pipeline/executor.ts",
+      "local_evidence_sha256": "d21d503d1181e726295652598fcab96932743e9aae4925680e48255d5ebe2aca",
+      "local_evidence_bytes": 3536,
+      "local_content_git_blob_sha": "af8a0a3164c83da961c91a205e590894fa90d0b9"
+    },
+    {
+      "repository": "cappyeo/discord-mcp",
+      "source_path": "packages/mcp-core/src/tools/guild/_lib/blueprint.plan-token.ts",
+      "source_ref": "7ed828f9979f261fbb3ce94c440a8f46c28b5716",
+      "ref_is_pinned_commit": true,
+      "source_url": "https://github.com/cappyeo/discord-mcp/blob/7ed828f9979f261fbb3ce94c440a8f46c28b5716/packages/mcp-core/src/tools/guild/_lib/blueprint.plan-token.ts",
+      "local_evidence_sha256": "35dac19e5b21c9656326d93c6e4f790bc9097134189a11fa8c4f898f661c43ce",
+      "local_evidence_bytes": 5056,
+      "local_content_git_blob_sha": "e349ae0af5cc4e814f08a739d12933b85b97da68"
+    },
+    {
+      "repository": "cappyeo/discord-mcp",
+      "source_path": "packages/mcp-core/src/tools/guild/change_plan.ts",
+      "source_ref": "7ed828f9979f261fbb3ce94c440a8f46c28b5716",
+      "ref_is_pinned_commit": true,
+      "source_url": "https://github.com/cappyeo/discord-mcp/blob/7ed828f9979f261fbb3ce94c440a8f46c28b5716/packages/mcp-core/src/tools/guild/change_plan.ts",
+      "local_evidence_sha256": "2bb1499d000a65b8607f41c1e78e9bd1511e72d970120901db87d502ae7bd179",
+      "local_evidence_bytes": 13070,
+      "local_content_git_blob_sha": "8f04af6dd9325fa1117bfef951e3a03f4e4db2e2"
+    },
+    {
+      "repository": "dolfies/discord.py-self",
+      "source_path": ".github/workflows/rename.yml",
+      "source_ref": "master",
+      "ref_is_pinned_commit": false,
+      "source_url": "https://github.com/dolfies/discord.py-self/blob/master/.github/workflows/rename.yml",
+      "local_evidence_sha256": "510a92f77c54ceb5c6d8fa547bcba976256ff5722a900a95221e405dd5384834",
+      "local_evidence_bytes": 1511,
+      "local_content_git_blob_sha": "fbf4ad33f3e41c6b4a4d87b660abcacb4b0d3859"
+    },
+    {
+      "repository": "dolfies/discord.py-self",
+      "source_path": "selfcord/__init__.py",
+      "source_ref": "7e2305c4e0926f334e24c439d9e80b80c33cbab4",
+      "ref_is_pinned_commit": true,
+      "source_url": "https://github.com/dolfies/discord.py-self/blob/7e2305c4e0926f334e24c439d9e80b80c33cbab4/selfcord/__init__.py",
+      "local_evidence_sha256": "dd385da0d0867f117169063e8eee4aa64c24065226a6aa2eb6c10bd74e3b4166",
+      "local_evidence_bytes": 2620,
+      "local_content_git_blob_sha": "bcd7be8414a536f8e2728ff425350245aad806f0"
+    },
+    {
+      "repository": "elizaos/eliza",
+      "source_path": "packages/core/src/services/message.ts",
+      "source_ref": "b026785e91729bd8a480e79663e77d9c5b68b125",
+      "ref_is_pinned_commit": true,
+      "source_url": "https://github.com/elizaos/eliza/blob/b026785e91729bd8a480e79663e77d9c5b68b125/packages/core/src/services/message.ts",
+      "local_evidence_sha256": "08f15e9b7fb245747b18fafe432ef30192f3806a98b40a8a69c10f90191808d8",
+      "local_evidence_bytes": 19413,
+      "local_content_git_blob_sha": "23eea582c66a7a7b55e5285c1880e56f1eb4ea2f"
+    },
+    {
+      "repository": "fagnersales/discord-mcp-bridge",
+      "source_path": "daemon.ts",
+      "source_ref": "172d18215e7beef068187e2ca38008d89060ac6d",
+      "ref_is_pinned_commit": true,
+      "source_url": "https://github.com/fagnersales/discord-mcp-bridge/blob/172d18215e7beef068187e2ca38008d89060ac6d/daemon.ts",
+      "local_evidence_sha256": "ef319c62ba4daac15e17f36f4cb4ed8813950126f294662be689e61670d0f01f",
+      "local_evidence_bytes": 14994,
+      "local_content_git_blob_sha": "fa03195486da78e1e7ef98238486d0debe8c5df5"
+    },
+    {
+      "repository": "fagnersales/discord-mcp-bridge",
+      "source_path": "discordMcp/index.tsx",
+      "source_ref": "172d18215e7beef068187e2ca38008d89060ac6d",
+      "ref_is_pinned_commit": true,
+      "source_url": "https://github.com/fagnersales/discord-mcp-bridge/blob/172d18215e7beef068187e2ca38008d89060ac6d/discordMcp/index.tsx",
+      "local_evidence_sha256": "f1c4c23f67fa429a5458192932bbb719db0bdc01ebfe6b1edf200e3d1f769ea4",
+      "local_evidence_bytes": 142763,
+      "local_content_git_blob_sha": "57f4b33dee68ee7b6d70b138e6d491054e97deb9"
+    },
+    {
+      "repository": "ggml-org/llama.cpp",
+      "source_path": "tools/server/server-decision.cpp",
+      "source_ref": "master",
+      "ref_is_pinned_commit": false,
+      "source_url": "https://github.com/ggml-org/llama.cpp/blob/master/tools/server/server-decision.cpp",
+      "local_evidence_sha256": "46e4b994d2969705f3c8b4a4c66c88de4ca7afa641e8c6237f38c711bdfd0ef5",
+      "local_evidence_bytes": 32744,
+      "local_content_git_blob_sha": "a0394bfbabd254f803a30865636b1156149453be"
+    },
+    {
+      "repository": "ggml-org/llama.cpp",
+      "source_path": "tools/server/server-decision.h",
+      "source_ref": "master",
+      "ref_is_pinned_commit": false,
+      "source_url": "https://github.com/ggml-org/llama.cpp/blob/master/tools/server/server-decision.h",
+      "local_evidence_sha256": "3cba039311fe60a6e29bd096d6d26ec6315c567e55da583f2adbb4eb860cf08a",
+      "local_evidence_bytes": 5473,
+      "local_content_git_blob_sha": "b38e86506c9436fe9bc2621985ffad40d33b4ac3"
+    },
+    {
+      "repository": "NousResearch/hermes-agent",
+      "source_path": "agent/memory_manager.py",
+      "source_ref": "7dab93b06e2bb3757dc18229169efcee1b5b47a3",
+      "ref_is_pinned_commit": true,
+      "source_url": "https://github.com/NousResearch/hermes-agent/blob/7dab93b06e2bb3757dc18229169efcee1b5b47a3/agent/memory_manager.py",
+      "local_evidence_sha256": "ae98198380e6031c3a9283e3ee463f38e44a1de69865a70cc4cf78360229ae1b",
+      "local_evidence_bytes": 49607,
+      "local_content_git_blob_sha": "fbf41a2ff89f17b4bed106c01841e967d8e3ab0b"
+    },
+    {
+      "repository": "microsoft/agent-framework",
+      "source_path": "python/packages/core/agent_framework/security.py",
+      "source_ref": "40763bed1a5e94a1698ba9ebf009e5622eb099aa",
+      "ref_is_pinned_commit": true,
+      "source_url": "https://github.com/microsoft/agent-framework/blob/40763bed1a5e94a1698ba9ebf009e5622eb099aa/python/packages/core/agent_framework/security.py",
+      "local_evidence_sha256": "ee82fe485a58a901b8c557040735f08732b68ca53c42484271332f7798941dfc",
+      "local_evidence_bytes": 211911,
+      "local_content_git_blob_sha": "ac660b2b04c11adb45db4c9261156e07e7f67095"
+    },
+    {
+      "repository": "openclaw/openclaw",
+      "source_path": "extensions/discord/src/monitor/inbound-context.ts",
+      "source_ref": "d9a083657dba5c5e1f1324b6aca06852e1171be2",
+      "ref_is_pinned_commit": true,
+      "source_url": "https://github.com/openclaw/openclaw/blob/d9a083657dba5c5e1f1324b6aca06852e1171be2/extensions/discord/src/monitor/inbound-context.ts",
+      "local_evidence_sha256": "1c58364db2c06bc5ac2b903c839e1594adc4486199ca7aeffb1e57077c74f0f8",
+      "local_evidence_bytes": 2988,
+      "local_content_git_blob_sha": "876ec2f4b7fc8484c140cf90854b7aa531a9639f"
+    },
+    {
+      "repository": "openclaw/openclaw",
+      "source_path": "extensions/discord/src/monitor/message-handler.history.ts",
+      "source_ref": "d9a083657dba5c5e1f1324b6aca06852e1171be2",
+      "ref_is_pinned_commit": true,
+      "source_url": "https://github.com/openclaw/openclaw/blob/d9a083657dba5c5e1f1324b6aca06852e1171be2/extensions/discord/src/monitor/message-handler.history.ts",
+      "local_evidence_sha256": "379465786d7a2a1ebea3f65caa374f6f8aab1e6f4b9eda5e41504d003073e3b8",
+      "local_evidence_bytes": 2311,
+      "local_content_git_blob_sha": "a73be9737abb7d9298a12c5eb06dc78732bf7d21"
+    },
+    {
+      "repository": "openclaw/openclaw",
+      "source_path": "extensions/discord/src/monitor/message-handler.preflight.ts",
+      "source_ref": "d9a083657dba5c5e1f1324b6aca06852e1171be2",
+      "ref_is_pinned_commit": true,
+      "source_url": "https://github.com/openclaw/openclaw/blob/d9a083657dba5c5e1f1324b6aca06852e1171be2/extensions/discord/src/monitor/message-handler.preflight.ts",
+      "local_evidence_sha256": "fdb7519b539b8e32e889b93f62cb4ed48f8aacd3c8aae8cdf0b0fca2f1c7209a",
+      "local_evidence_bytes": 34524,
+      "local_content_git_blob_sha": "5650a44c6585110587c5bb7327efe34ad2e0b956"
+    },
+    {
+      "repository": "tensakulabs/discord-mcp",
+      "source_path": "src/daemon.ts",
+      "source_ref": "1f0fdd4f86ba12430a8b337f26baf7a5e829c050",
+      "ref_is_pinned_commit": true,
+      "source_url": "https://github.com/tensakulabs/discord-mcp/blob/1f0fdd4f86ba12430a8b337f26baf7a5e829c050/src/daemon.ts",
+      "local_evidence_sha256": "3c819be1a652f8f6cdb7b6071fd65187cba63623c9a7f1e1486338b1ba01a214",
+      "local_evidence_bytes": 5783,
+      "local_content_git_blob_sha": "c0901ee90f9a5b9563baeca0f2558feb6ad4786d"
+    },
+    {
+      "repository": "tensakulabs/discord-mcp",
+      "source_path": "src/db.ts",
+      "source_ref": "1f0fdd4f86ba12430a8b337f26baf7a5e829c050",
+      "ref_is_pinned_commit": true,
+      "source_url": "https://github.com/tensakulabs/discord-mcp/blob/1f0fdd4f86ba12430a8b337f26baf7a5e829c050/src/db.ts",
+      "local_evidence_sha256": "ba55d5e73e46c58e5b2804ab21b0adfa78ec67c872e638f8712396a809ddf7e8",
+      "local_evidence_bytes": 5340,
+      "local_content_git_blob_sha": "9e03275dfbb6ed176c811790498c4f9aa46f0f92"
+    },
+    {
+      "repository": "dolfies/discord.py-self",
+      "source_path": "pyproject.toml",
+      "source_ref": "7e2305c4e0926f334e24c439d9e80b80c33cbab4",
+      "ref_is_pinned_commit": true,
+      "source_url": "https://github.com/dolfies/discord.py-self/blob/7e2305c4e0926f334e24c439d9e80b80c33cbab4/pyproject.toml",
+      "inspection": "Connector-returned source inspected; no local evidence copy in this manifest."
+    }
+  ]
+}

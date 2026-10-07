@@ -1,0 +1,358 @@
+{
+  "schema_version": 2,
+  "revision": "0.2",
+  "created_date": "2026-10-07",
+  "artifact_kind": "architecture_addendum_and_implementation_handoff",
+  "production_code_implemented": false,
+  "precedence": [
+    "architecture-v0.2-addendum.md",
+    "synthetic-replay-implementation-handoff.md",
+    "unaffected_v0.1_provisions"
+  ],
+  "baselines": [
+    {
+      "path": "baseline/persistent-agent-architecture-package.zip",
+      "sha256": "0ea83be0059ebe533e5689c8739027f9013bd0f6bb8f1029a261d0050fcb1522",
+      "bytes": 55482,
+      "preservation": "byte_identical",
+      "members": [
+        {
+          "path": "persistent-agent-package/README.md",
+          "sha256": "750786d76fae2f9fbc6b49353db5ef4f7a543de9937563ccdf1a17cf65795608",
+          "bytes": 3178
+        },
+        {
+          "path": "persistent-agent-package/evaluation-plan.md",
+          "sha256": "525237df607f3e7e6d42da3b3516068712a2952020e0c2ae5a02682be9bb68c2",
+          "bytes": 18378
+        },
+        {
+          "path": "persistent-agent-package/persistent-agent-architecture.md",
+          "sha256": "288e4bc65223cf09e78e6c1de9a54c47880ef3f39ade71797636c0305451378c",
+          "bytes": 47722
+        },
+        {
+          "path": "persistent-agent-package/research-evidence.md",
+          "sha256": "0664dff75a63d8553663e9b1e940d233c1b12cf31ca3ad331762792dc14632d6",
+          "bytes": 28492
+        },
+        {
+          "path": "persistent-agent-package/runtime-contracts.md",
+          "sha256": "8a86adb57d3da6ed991153ba0e2685daee735c410ae2a6c9afb3857a695817ee",
+          "bytes": 25994
+        },
+        {
+          "path": "persistent-agent-package/source-manifest.json",
+          "sha256": "cd638eb7df3befc9be2715fc888baf2cac352d4456341e3535c0d8eb016484c7",
+          "bytes": 17791
+        }
+      ]
+    },
+    {
+      "path": "baseline/adversarial-architecture-review.md",
+      "sha256": "4d71ce4a74ee891d670515278a4650a343df2b17a2fb5ed4c4e2e17ebec52e20",
+      "bytes": 39298,
+      "preservation": "byte_identical"
+    }
+  ],
+  "decisions": [
+    {
+      "id": "D01",
+      "findings": [
+        "F01"
+      ],
+      "supersedes": [
+        "A.6",
+        "A.9",
+        "C.1",
+        "C.5",
+        "C.6"
+      ],
+      "review_test_refs": [
+        "T01",
+        "T02",
+        "T03"
+      ],
+      "invariants": [
+        "I01",
+        "I02",
+        "I03"
+      ]
+    },
+    {
+      "id": "D02",
+      "findings": [
+        "F02"
+      ],
+      "supersedes": [
+        "C.5"
+      ],
+      "review_test_refs": [
+        "T01",
+        "T04"
+      ],
+      "invariants": [
+        "I01",
+        "I02"
+      ]
+    },
+    {
+      "id": "D03",
+      "findings": [
+        "F03",
+        "F04"
+      ],
+      "supersedes": [
+        "A.9",
+        "C.7"
+      ],
+      "review_test_refs": [
+        "T05",
+        "T06",
+        "T07",
+        "T11",
+        "T24"
+      ],
+      "invariants": [
+        "I06",
+        "I07",
+        "I13"
+      ]
+    },
+    {
+      "id": "D04",
+      "findings": [
+        "F05",
+        "F20"
+      ],
+      "supersedes": [
+        "A.9",
+        "A.13",
+        "C.3",
+        "C.8"
+      ],
+      "review_test_refs": [
+        "T08"
+      ],
+      "invariants": [
+        "I05",
+        "I06"
+      ]
+    },
+    {
+      "id": "D05",
+      "findings": [
+        "F06",
+        "F10",
+        "F11"
+      ],
+      "supersedes": [
+        "A.5",
+        "A.6",
+        "C.6"
+      ],
+      "review_test_refs": [
+        "T03",
+        "T04",
+        "T09",
+        "T10",
+        "T12"
+      ],
+      "invariants": [
+        "I02",
+        "I04"
+      ]
+    },
+    {
+      "id": "D06",
+      "findings": [
+        "F07",
+        "F08"
+      ],
+      "supersedes": [
+        "A.10",
+        "C.7",
+        "C.8"
+      ],
+      "review_test_refs": [
+        "T14",
+        "T17",
+        "T18",
+        "T19",
+        "T20",
+        "T21",
+        "T22"
+      ],
+      "invariants": [
+        "I08",
+        "I09",
+        "I10",
+        "I11",
+        "I15",
+        "I16"
+      ]
+    },
+    {
+      "id": "D07",
+      "findings": [
+        "F15"
+      ],
+      "supersedes": [
+        "C.5"
+      ],
+      "review_test_refs": [
+        "T02",
+        "T07"
+      ],
+      "invariants": [
+        "I03",
+        "I07",
+        "I12"
+      ]
+    },
+    {
+      "id": "D08",
+      "findings": [
+        "F12",
+        "F21"
+      ],
+      "supersedes": [
+        "A.6",
+        "C.10"
+      ],
+      "review_test_refs": [
+        "T13",
+        "T14",
+        "T25"
+      ],
+      "invariants": [
+        "I14",
+        "I16"
+      ]
+    },
+    {
+      "id": "D09",
+      "findings": [
+        "F13",
+        "F14"
+      ],
+      "supersedes": [
+        "A.10",
+        "C.1"
+      ],
+      "review_test_refs": [
+        "T15",
+        "T16"
+      ],
+      "invariants": [
+        "I08",
+        "I12"
+      ]
+    },
+    {
+      "id": "D10",
+      "findings": [
+        "F16"
+      ],
+      "supersedes": [
+        "A.7"
+      ],
+      "review_test_refs": [
+        "T23"
+      ],
+      "invariants": [
+        "I01",
+        "I07",
+        "I13"
+      ]
+    },
+    {
+      "id": "D11",
+      "findings": [
+        "F17",
+        "F18",
+        "F22"
+      ],
+      "supersedes": [
+        "A.11",
+        "E.7"
+      ],
+      "review_test_refs": [
+        "T05",
+        "T06",
+        "T07",
+        "T23",
+        "T26",
+        "T27"
+      ],
+      "invariants": [
+        "I01",
+        "I07",
+        "I13"
+      ]
+    }
+  ],
+  "blocker_resolutions": [
+    {
+      "finding": "F01",
+      "status": "resolved_as_contract_decision",
+      "implementation_verified": false
+    },
+    {
+      "finding": "F02",
+      "status": "resolved_as_contract_decision",
+      "implementation_verified": false
+    },
+    {
+      "finding": "F04",
+      "status": "resolved_as_contract_decision",
+      "implementation_verified": false
+    },
+    {
+      "finding": "F05",
+      "status": "resolved_as_contract_decision",
+      "implementation_verified": false
+    },
+    {
+      "finding": "F06",
+      "status": "resolved_as_contract_decision",
+      "implementation_verified": false
+    },
+    {
+      "finding": "F07",
+      "status": "resolved_as_contract_decision",
+      "implementation_verified": false
+    }
+  ],
+  "experimental_findings": [
+    "F09",
+    "F17",
+    "F18",
+    "F19",
+    "F22"
+  ],
+  "deferred_findings": [
+    "F23"
+  ],
+  "test_ref_note": "T identifiers refer to the preserved review. T22 live chunk behavior is postponed; unsupported chunking is tested now. Empirical belief/privacy/sensor tests are experiments, not deterministic invariant claims.",
+  "artifacts": [
+    {
+      "path": "architecture-v0.2-addendum.md",
+      "sha256": "cf4a478a71a6648433c4931a980a2f307e942eb26474c4b6078ba15d5d9cbb11",
+      "bytes": 19005
+    },
+    {
+      "path": "synthetic-replay-implementation-handoff.md",
+      "sha256": "005b359f3aba68589d3c0e139fb18c73ee1afb16b8c0555714ad6b65ff468799",
+      "bytes": 54173
+    },
+    {
+      "path": "README.md",
+      "sha256": "6581cb1a65b3fdd3d31b764ab80c5c2e774a6fd3956b3dad32133c948a6a3929",
+      "bytes": 2415
+    }
+  ],
+  "readiness": "READY_FOR_SYNTHETIC_REPLAY_ONLY",
+  "implemented_tests_run": false,
+  "manifest_note": "This manifest does not hash itself or its enclosing ZIP; hashes cover exact baseline and document bytes."
+}
