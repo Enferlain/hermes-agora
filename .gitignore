@@ -1,0 +1,80 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyright/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Build/package output
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Local runtime state
+runtime/
+state/
+data/
+tmp/
+temp/
+
+# Databases / journals
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+
+# Local model files
+*.gguf
+*.safetensors
+*.bin
+models/
+
+# Generated test/replay output
+artifacts/
+test-results/
+replay-results/
+
+# direnv / Nix local state
+.direnv/
+
+# Editors
+.idea/
+*.swp
+*.swo
+*~
+
+# OS junk
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+.beads-credential-key
+.beads/proxieddb/
