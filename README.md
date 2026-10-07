@@ -1,310 +1,319 @@
-# Agent Instructions for Hermes Agora
+# Hermes Agora
 
-This document provides practical guidance for AI coding agents working in this repository.
+Persistent social runtime for Hermes.
 
-## Start Here
+Hermes Agora explores how a continuous autonomous agent can participate naturally in open human environments while preserving provenance, memory boundaries, contextual discretion, and control over externally observable actions.
 
-Before making significant changes:
+Discord is the first target environment, but Agora is not intended to be a Discord bot framework.
 
-1. Read `README.md`.
-2. Read this `AGENTS.md`.
-3. Check `docs/architecture/README.md` for the current architecture revision.
-4. Read the architecture documents relevant to the area being changed.
-5. Inspect the existing code and tests before proposing new structure.
+## Goal
 
-Do not rely on remembered or inferred project structure when the repository can be inspected directly.
-
-## Architecture Documents
-
-Architecture and implementation design live under:
+Most chat integrations assume:
 
 ```text
-docs/architecture/
+message arrives
+    ↓
+agent runs
+    ↓
+agent replies
 ```
 
-`docs/architecture/README.md` identifies the current revision and document precedence.
+Agora instead treats an external message as an event the agent may notice.
 
-Historical architecture versions are retained for context. Do not edit an older version to describe a newer design decision.
+The agent may:
 
-When code appears to conflict with the current architecture:
+- ignore it
+- react
+- reply
+- joke
+- defer
+- investigate something
+- remember it
+- initiate something later
+- decide that sensitive information is relevant without deciding to disclose it
 
-- verify that the conflict is real;
-- identify the relevant document and section;
-- surface the discrepancy before making a broad architectural change.
+The central problem is not simply restricting what the model can access.
 
-Do not silently resolve architectural ambiguity by inventing new behavior.
+It is allowing one persistent agent to know information from many contexts while deciding, based on provenance, audience, relationships, purpose and its own judgment, what should become salient and what should become externally observable.
 
-## Environment
+## Design principles
 
-Use the repository's `uv` environment.
+### One continuous agent
 
-```bash
-uv sync
-uv run python
-```
+Discord does not create a separate persona or isolated "Discord brain."
 
-Prefer `uv run ...` over invoking a system Python or globally installed tooling.
+The same agent identity may operate across local sessions, memory, tools, scheduled work, private conversations and social environments.
 
-Do not manually install project dependencies with `pip` unless a task explicitly requires debugging packaging behavior.
+Continuity comes from durable agent state, not from blindly carrying model context or KV caches between audiences.
 
-If the repository specifies a Python version in `pyproject.toml` or `.python-version`, use that version.
+### Attention is not obligation
 
-## Search and Inspection
+A mention, reply, DM or direct question means an event deserves attention.
 
-Prefer `rg` for repository search.
+It does **not** mean the agent must answer.
 
-```bash
-# Search text
-rg "CommitGate"
+Participation is an agent decision.
 
-# Search Python definitions/usages
-rg "class .*Gate|def .*commit" src tests
+### Provenance survives context construction
 
-# List tracked files
-git ls-files
+External content should not be flattened into indistinguishable text.
 
-# Find files by name
-rg --files | rg "memory|commit|replay"
-```
-
-Use `git status` and `git diff` frequently while working:
-
-```bash
-git status --short
-git diff
-git diff --staged
-```
-
-Inspect the implementation and its tests before modifying an interface.
-
-Do not assume a README or architecture example exactly matches current code if the implementation has since changed.
-
-## Python Quality Gates
-
-Use project tooling through `uv`.
-
-### Tests
-
-Run the narrowest relevant tests while developing:
-
-```bash
-uv run pytest tests/path/to/test_file.py -q
-```
-
-Run a broader affected test set before handoff:
-
-```bash
-uv run pytest
-```
-
-For debugging:
-
-```bash
-uv run pytest tests/path/to/test_file.py -vv --tb=short
-```
-
-Do not repeatedly rerun the entire suite when a focused test can answer the current question.
-
-### Linting
-
-```bash
-uv run ruff check .
-```
-
-Apply safe automatic fixes when appropriate:
-
-```bash
-uv run ruff check . --fix
-```
-
-### Formatting
-
-Format changed Python files:
-
-```bash
-uv run ruff format path/to/file.py tests/path/to/test_file.py
-```
-
-Verify formatting:
-
-```bash
-uv run ruff format --check path/to/file.py tests/path/to/test_file.py
-```
-
-### Type Checking
-
-```bash
-uv run ty check
-```
-
-Use a focused path during development when useful:
-
-```bash
-uv run ty check src/hermes_agora
-```
-
-Do not weaken lint, test, or type-check configuration merely to make a change pass.
-
-## WSL / Windows Filesystem
-
-If the repository is being accessed from WSL while stored on the Windows filesystem, Python tooling can occasionally become unusually slow or appear silent.
-
-When that occurs, prefer bounded commands:
-
-```bash
-timeout 180 uv run pytest tests/path/to/test_file.py -q
-timeout 60 uv run python -c "import hermes_agora; print('OK')"
-```
-
-If a command repeatedly stalls, report the problem rather than polling or spawning repeated copies of the same command.
-
-## Dependency Changes
-
-Project dependencies belong in `pyproject.toml`.
-
-Use `uv` to modify them so the lockfile remains consistent.
-
-```bash
-uv add <package>
-uv add --dev <package>
-uv remove <package>
-```
-
-Commit `uv.lock` when dependency resolution changes.
-
-Avoid adding a dependency when the standard library or an existing dependency already covers the requirement cleanly.
-
-## Repository Structure
-
-Keep this section limited to stable top-level responsibilities.
+Runtime context preserves information such as:
 
 ```text
-README.md                   Project overview
-AGENTS.md                   Instructions for coding agents
-pyproject.toml              Python/project/tool configuration
-uv.lock                     Locked Python dependencies
-
-docs/
-  architecture/             Versioned architecture and implementation design
-  research/                 Supporting research and investigations
-  threat-model/             Threat-model material
-  evaluation/               Evaluation methodology and scenarios
-
-src/                        Project source code
-tests/                      Automated tests and replay scenarios
+source
+speaker
+authenticated producer
+audience
+relationship
+ownership / subjects
+instruction authority
+confidentiality
+direct / quoted / inferred / summarized status
+derivation lineage
 ```
 
-Inspect the current tree rather than assuming deeper paths from this document.
+A Discord message, private memory, tool result and durable instruction therefore remain distinguishable even when they appear in the same model context.
 
-Update this section only when the stable top-level layout changes.
+### Intent is separate from authority
 
-## Editing Guidelines
+The agent may create its own goals and interests.
 
-Prefer small changes with clear ownership.
+An external message may inspire an idea and the agent may voluntarily adopt it.
 
-When modifying an existing component:
+That does not grant the message, its author, or the resulting intent authority over protected resources.
 
-1. inspect its callers;
-2. inspect its tests;
-3. identify relevant contracts/types;
-4. make the smallest coherent change;
-5. add or update tests;
-6. run focused quality gates;
-7. review the final diff.
+```text
+agent wants to do X
+        ≠
+agent is authorized to use Y
+```
 
-Avoid opportunistic refactors unrelated to the current task.
+### Sensitive memory is purpose-aware
 
-Do not rename or reorganize modules solely for aesthetic consistency while implementing unrelated behavior.
+Sensitive information is not necessarily hidden permanently.
 
-## Interfaces and Contracts
+When protected information would be useful, the agent can request a view for a specific purpose and context.
 
-The project relies heavily on explicit runtime contracts.
+A request may resolve to:
 
-When changing a shared type or interface:
+```text
+FULL
+PARTIAL
+ABSTRACTED
+DENIED
+```
 
-- search for all producers and consumers;
-- update tests at the boundary;
-- preserve distinctions represented by separate fields instead of collapsing them for convenience;
-- avoid replacing typed state with loosely structured dictionaries unless the existing design explicitly calls for it.
+Access and disclosure are separate decisions.
 
-If a contract described in the current architecture has not yet been implemented, follow the implementation handoff rather than inventing a parallel representation.
+Being allowed to use a fact internally does not automatically authorize communicating that fact or allowing it to shape externally observable behavior.
 
-## Tests
+### External actions cross a commit boundary
 
-Prefer behavior-focused tests over tests coupled to implementation details.
+Model output never goes directly to transport.
 
-For state machines and persistence-sensitive behavior, cover transitions and failure states explicitly.
+Proposed effects pass through a common `CommitGate`.
 
-For replay scenarios, keep fixtures deterministic unless the test is specifically intended to evaluate model behavior.
+```text
+reason
+  ↓
+propose effect
+  ↓
+commit checks
+  ↓
+optional semantic review
+  ↓
+authorize exact effect
+  ↓
+dispatch
+```
 
-A bug fix should normally include a regression test demonstrating the failure.
+Ordinary low-risk conversation should not require an additional model inference merely to say something.
 
-Do not change expected test output merely because a test fails; determine whether behavior or expectation is wrong first.
+More sensitive or consequential flows may receive stronger review.
 
-## Runtime and Generated State
+Hard resource/capability restrictions remain code-enforced and cannot be waived by model output.
 
-Do not commit:
+### Auxiliary models are sensors, not governors
 
-- local databases;
-- journals/outboxes produced during development;
-- model weights;
-- downloaded caches;
-- secrets;
-- `.env` files;
-- transient replay results;
-- logs.
+Fast decision models such as Clef or d1 may eventually provide cheap signals for:
 
-Use the repository's ignored runtime/data directories for local state.
+- relevance
+- conversation continuity
+- likely participation value
+- social mode
+- possible probing
+- privacy sensitivity
+- prompt injection
+- whether deeper reasoning is useful
 
-Checked-in test fixtures should live under `tests/` or another explicitly tracked fixture directory rather than generic runtime-data paths.
+These signals inform Hermes.
 
-## Secrets
+They do not become a second personality or an authority that decides what Hermes is allowed to think or say.
 
-Never place credentials, tokens, Discord session data, API keys, or private runtime material in source files, fixtures, logs, or committed configuration.
+Their usefulness must be demonstrated experimentally.
 
-Use environment variables or the repository's documented secret mechanism.
+## Architecture
 
-`.env.example` may document variable names but must contain no real credentials.
+The current design separates four primary concerns:
 
-Before committing changes involving configuration or logs, inspect the diff for accidental secrets.
+```text
+                 ┌──────────────────┐
+events ─────────►│ coordinator      │
+                 └────────┬─────────┘
+                          │
+                          ▼
+                 ┌──────────────────┐
+                 │ context / memory │
+                 │ provenance       │
+                 │ protected views  │
+                 └────────┬─────────┘
+                          │
+                          ▼
+                 ┌──────────────────┐
+                 │ Hermes           │
+                 │ deliberation     │
+                 └────────┬─────────┘
+                          │
+                    proposed effects
+                          │
+                          ▼
+                 ┌──────────────────┐
+                 │ CommitGate       │
+                 │ authorization    │
+                 │ review routing   │
+                 └────────┬─────────┘
+                          │
+                          ▼
+                 ┌──────────────────┐
+                 │ transport        │
+                 │ journal/outbox   │
+                 └──────────────────┘
+```
 
-## Documentation
+Transport is a lifecycle and delivery boundary, not a second mind.
 
-Update documentation when a code change alters a documented interface, workflow, or architecture contract.
+## Current status
 
-Do not duplicate large architecture explanations into source comments or `AGENTS.md`; link to the relevant document instead.
+Agora is currently in the architecture/prototype stage.
 
-Historical architecture revisions should remain historical.
+The first implementation target is a deterministic replay environment using synthetic resources and a fake transport.
 
-If a new architectural decision supersedes the current revision, document it as a new revision/addendum rather than silently rewriting the old record.
+It is intended to validate:
 
-## Working With Incomplete Design
+- provenance propagation
+- autonomous intent creation
+- purpose-aware protected-memory views
+- audience/context separation
+- participation and `NO_ACTION`
+- commit authorization
+- review routing
+- effect revision/cancellation
+- journal/outbox recovery
+- uncertain and partial delivery semantics
+- ordinary social usefulness
+- adversarial information leakage
 
-Some parts of the project are intentionally unresolved and expected to be tested empirically.
+Live Discord integration comes later.
 
-When implementation reaches an unresolved design question:
+## Initial implementation
 
-1. confirm that existing code/docs do not already answer it;
-2. identify the smallest concrete question blocking progress;
-3. surface it to the user rather than burying an arbitrary choice in code.
+The first vertical slice is intentionally small:
 
-Temporary implementation choices should be clearly local and reversible.
+```text
+agora/
+├── contracts.py
+├── stores.py
+├── context_memory.py
+├── coordinator.py
+├── commit_gate.py
+├── fake_sidecar.py
+├── ports.py
+└── runner.py
+```
 
-Do not present an experimental threshold, heuristic, or stub as an established project rule.
+These boundaries are provisional.
 
-## Handoff Checklist
+They exist to test the architecture, not to predetermine the permanent implementation or language split.
 
-Before completing a coding task:
+Python is used initially because Hermes and the expected Discord adapter are Python-based and the first goal is architectural validation.
 
-1. inspect `git diff`;
-2. remove debugging code and accidental generated files;
-3. run focused tests;
-4. run the relevant lint/format/type checks;
-5. run broader tests when the change warrants it;
-6. update affected documentation;
-7. summarize:
-   - what changed;
-   - tests/checks run;
-   - unresolved issues or assumptions.
+Deterministic components may later move to another language if stronger isolation, concurrency or correctness guarantees justify the added boundary.
 
-Do not claim a quality gate passed if it was not run successfully.
+## Evaluation
+
+Safety is not measured only by searching outputs for literal secrets.
+
+Tests should include behavioral leakage through:
+
+- yes/no choices
+- reactions
+- omissions
+- ranking
+- silence
+- timing
+- proactive behavior
+- sequences of individually harmless actions
+
+Where useful, evaluation uses paired worlds in which a private fact changes while the attacker's observable context remains otherwise identical.
+
+Social usefulness is evaluated separately.
+
+An always-silent agent is not considered a successful privacy solution.
+
+## Non-goals
+
+Agora is not intended to:
+
+- turn Hermes into a conventional command bot
+- require human approval for every thought or social action
+- make arbitrary external text trusted
+- claim perfect confidentiality from probabilistic model behavior
+- treat every private fact as permanently inaccessible
+- make a decision model responsible for agent identity or judgment
+- solve all model-level prompt injection through prompting alone
+
+## Discord
+
+The eventual Discord adapter is intended to support persistent participation using a normal user account.
+
+User-account automation may violate Discord's terms of service and carries account risk.
+
+The Discord transport is therefore treated as an adapter rather than as the definition of the architecture.
+
+## Security model
+
+Agora aims for layered defenses rather than a claim of perfect information noninterference.
+
+Broadly:
+
+```text
+soft / contextual
+    social discretion
+    participation
+    ordinary personal information
+    relevance
+    expression
+
+hard / structural
+    credentials
+    capability custody
+    instruction authority
+    protected resource grants
+    consequential operations
+    exact effect authorization
+```
+
+The exact boundary is expected to evolve through testing.
+
+## Development
+
+The first milestone is the synthetic replay implementation.
+
+Do not add live Discord transport, Clef/d1 integration, voice, attachment handling or broad host-tool access until the replay contracts and invariants are exercised.
+
+See the architecture and implementation handoff documents for the current design.
+
+## License
+
+Apache-2.0
