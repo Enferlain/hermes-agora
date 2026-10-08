@@ -10,7 +10,7 @@ Read in this order:
 2. [Synthetic replay implementation handoff](synthetic-replay-implementation-handoff.md): exact records, ports, module ownership, state transitions, persistence, defaults, stubs, invariants, test order and extension questions.
 3. [Revision manifest](revision-manifest.json): baseline/output hashes and finding-to-decision/test traceability.
 
-The [original architecture ZIP](baseline/persistent-agent-architecture-package.zip) and [accepted adversarial review](baseline/adversarial-architecture-review.md) are preserved byte-for-byte under baseline/. Their contents are not rewritten. The manifest records which original provisions are superseded. Precedence is addendum, then handoff, then the original package for unaffected matters.
+The [original architecture package](../v0.1/) and [accepted adversarial review](../v0.1/adversarial-architecture-review.md) are preserved byte-for-byte as the extracted v0.1 tree. Their contents are not rewritten. The manifest records which original provisions are superseded. Precedence is addendum, then handoff, then the original package for unaffected matters.
 
 The revised slice starts with scripted synthetic replay. It tests one autonomous identity across rooms, DM and scheduled work, purpose-separated authority, runtime provenance, controlled views, selective review and restart-safe fake dispatch. It uses modules and separate SQLite ownership domains, without requiring multiple services, a live Discord account or Clef.
 

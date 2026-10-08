@@ -11,45 +11,45 @@
   ],
   "baselines": [
     {
-      "path": "baseline/persistent-agent-architecture-package.zip",
+      "path": "../v0.1/",
       "sha256": "0ea83be0059ebe533e5689c8739027f9013bd0f6bb8f1029a261d0050fcb1522",
       "bytes": 55482,
       "preservation": "byte_identical",
       "members": [
         {
-          "path": "persistent-agent-package/README.md",
+          "path": "README.md",
           "sha256": "750786d76fae2f9fbc6b49353db5ef4f7a543de9937563ccdf1a17cf65795608",
           "bytes": 3178
         },
         {
-          "path": "persistent-agent-package/evaluation-plan.md",
+          "path": "evaluation-plan.md",
           "sha256": "525237df607f3e7e6d42da3b3516068712a2952020e0c2ae5a02682be9bb68c2",
           "bytes": 18378
         },
         {
-          "path": "persistent-agent-package/persistent-agent-architecture.md",
+          "path": "persistent-agent-architecture.md",
           "sha256": "288e4bc65223cf09e78e6c1de9a54c47880ef3f39ade71797636c0305451378c",
           "bytes": 47722
         },
         {
-          "path": "persistent-agent-package/research-evidence.md",
+          "path": "research-evidence.md",
           "sha256": "0664dff75a63d8553663e9b1e940d233c1b12cf31ca3ad331762792dc14632d6",
           "bytes": 28492
         },
         {
-          "path": "persistent-agent-package/runtime-contracts.md",
+          "path": "runtime-contracts.md",
           "sha256": "8a86adb57d3da6ed991153ba0e2685daee735c410ae2a6c9afb3857a695817ee",
           "bytes": 25994
         },
         {
-          "path": "persistent-agent-package/source-manifest.json",
+          "path": "source-manifest.json",
           "sha256": "cd638eb7df3befc9be2715fc888baf2cac352d4456341e3535c0d8eb016484c7",
           "bytes": 17791
         }
       ]
     },
     {
-      "path": "baseline/adversarial-architecture-review.md",
+      "path": "../v0.1/adversarial-architecture-review.md",
       "sha256": "4d71ce4a74ee891d670515278a4650a343df2b17a2fb5ed4c4e2e17ebec52e20",
       "bytes": 39298,
       "preservation": "byte_identical"
@@ -338,21 +338,42 @@
   "artifacts": [
     {
       "path": "architecture-v0.2-addendum.md",
-      "sha256": "cf4a478a71a6648433c4931a980a2f307e942eb26474c4b6078ba15d5d9cbb11",
-      "bytes": 19005
+      "sha256": "44fd611cbea5358cc3e582e89f8085491bf79a7c01d1b957d342b355c0f7d7b3",
+      "bytes": 18962,
+      "hash_basis": "2026-10-08 post-link-fix bytes"
     },
     {
       "path": "synthetic-replay-implementation-handoff.md",
-      "sha256": "005b359f3aba68589d3c0e139fb18c73ee1afb16b8c0555714ad6b65ff468799",
-      "bytes": 54173
+      "sha256": "6dbdf7420aa407afef8db669e7441a691115701a40db206938a2fbd66386e607",
+      "bytes": 54130,
+      "hash_basis": "2026-10-08 post-link-fix bytes"
     },
     {
       "path": "README.md",
-      "sha256": "6581cb1a65b3fdd3d31b764ab80c5c2e774a6fd3956b3dad32133c948a6a3929",
-      "bytes": 2415
+      "sha256": "5471962467b8d4c0025efc193bf4fe007ac26ba4e9fbcbf180fb5f444c73f294",
+      "bytes": 2387,
+      "hash_basis": "2026-10-08 post-link-fix bytes"
     }
   ],
   "readiness": "READY_FOR_SYNTHETIC_REPLAY_ONLY",
   "implemented_tests_run": false,
-  "manifest_note": "This manifest does not hash itself or its enclosing ZIP; hashes cover exact baseline and document bytes."
+  "manifest_note": "This manifest does not hash itself or its enclosing ZIP; hashes cover exact baseline and document bytes.",
+  "artifacts_update_note": "2026-10-08 repo relocation correction: the original authoring layout kept the v0.1 package as a ZIP under baseline/ with the adversarial review beside it; the repository stores them extracted as the v0.1/ tree. Baseline paths in this manifest were repointed accordingly (package -> ../v0.1/ with plain member names; review -> ../v0.1/adversarial-architecture-review.md); all baseline hashes are unchanged and verify against the v0.1 files. The three v0.2 documents listed in artifacts were edited the same day to fix their baseline/ links to point at ../v0.1/; their hashes were recomputed after that edit \u2014 original authored hashes are recorded in artifacts_original_hashes.",
+  "artifacts_original_hashes": {
+    "note": "sha256/bytes of the three v0.2 documents as originally authored (7 October 2026), before the 2026-10-08 baseline/ link correction. Unedited files are not listed.",
+    "files": {
+      "architecture-v0.2-addendum.md": {
+        "sha256": "cf4a478a71a6648433c4931a980a2f307e942eb26474c4b6078ba15d5d9cbb11",
+        "bytes": 19005
+      },
+      "synthetic-replay-implementation-handoff.md": {
+        "sha256": "005b359f3aba68589d3c0e139fb18c73ee1afb16b8c0555714ad6b65ff468799",
+        "bytes": 54173
+      },
+      "README.md": {
+        "sha256": "6581cb1a65b3fdd3d31b764ab80c5c2e774a6fd3956b3dad32133c948a6a3929",
+        "bytes": 2415
+      }
+    }
+  }
 }

@@ -2,7 +2,7 @@
 
 Accepted design revision · 7 October 2026 · No implementation
 
-This addendum applies to the unchanged [v0.1 package](baseline/persistent-agent-architecture-package.zip) and the accepted [adversarial review](baseline/adversarial-architecture-review.md). It supersedes only the decisions identified below. The original research, continuous-identity goal, transport-sidecar direction and platform-independent behavioral stages remain.
+This addendum applies to the unchanged [v0.1 package](../v0.1/) and the accepted [adversarial review](../v0.1/adversarial-architecture-review.md). It supersedes only the decisions identified below. The original research, continuous-identity goal, transport-sidecar direction and platform-independent behavioral stages remain.
 
 **Precedence:** v0.2 addendum → v0.2 replay handoff → unchanged v0.1 for matters not superseded. The review explains why changes were needed; its unresolved alternative proposals are settled by this revision where stated. A = original architecture, C = original runtime contracts, E = original evaluation plan.
 

@@ -2,7 +2,7 @@
 
 Normative contract for the first coding session · 7 October 2026 · No code implemented
 
-Read the [v0.2 addendum](architecture-v0.2-addendum.md) first. The [v0.1 package](baseline/persistent-agent-architecture-package.zip) supplies research/context; its superseded contracts must not silently reappear. The [accepted review](baseline/adversarial-architecture-review.md) supplies attack counterexamples. This handoff settles defaults for a small replay harness, not the future production platform.
+Read the [v0.2 addendum](architecture-v0.2-addendum.md) first. The [v0.1 package](../v0.1/) supplies research/context; its superseded contracts must not silently reappear. The [accepted review](../v0.1/adversarial-architecture-review.md) supplies attack counterexamples. This handoff settles defaults for a small replay harness, not the future production platform.
 
 ## 1. Scope and entry instructions
 
