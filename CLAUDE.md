@@ -118,6 +118,14 @@ timeout 60 uv run python -c "print('OK')"
 
 If a command repeatedly stalls, report it rather than repeatedly polling or spawning duplicate runs.
 
+## Subagents
+
+Prefer launching subagents for reviews after meaningful tasks are finished.
+
+Delegate subagents for tasks when deemed that they can speed up work.
+
+Reviewer model should always be GLM-5.3-Flash Max [1m] (Whatever the exact id is).
+
 ## Editing Guidelines
 
 Prefer the smallest coherent change that satisfies the task.
