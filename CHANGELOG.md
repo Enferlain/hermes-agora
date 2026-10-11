@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Added the package structure convention (implementation note): handoff §2 boundary names are permanent top-level modules; modules promote to re-exporting packages on a growth trigger; contracts/ is the first planned promotion at M2 start.
+
 - Implemented the M1 whole-turn wiring: coordinator turn loop with manifest budgets, compare-and-set step acceptance, and the crash checkpoint between model and acceptance; context/memory snapshot assembly with CONTEXT_ASSEMBLY and MAIN producer coverage; CommitGate with code checks, UNSUPPORTED/HARD_DENY determinations, and versioned CommitAuthorization; fake sidecar with PREPARED attempts, single-use epoch/generation/expiry-fenced leases, durable DISPATCH_STARTED linearization, world dispatch, conservative UNKNOWN, and reconciliation; fake world as independent durable visibility evidence; scripted main model port; replay runner + `agora replay` CLI with validated run manifests parsed through the model boundary.
 - Demonstrated the four M1 outcomes deterministically: ordinary message, reaction (exact rendered shape), explicit no action (no outbox/attempt/world rows), and timer-driven voluntary initiation (deduped fixed-time defer wake); plus unsupported-destination denial staying inert, quiet budget exhaustion, and crash-recovery continuation.
 
