@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from agora.contracts import (
+    REASON_CODES,
     RECORD_TYPES,
     DependencyKind,
     PayloadStatus,
@@ -322,10 +323,34 @@ def _open_or_create(path: Path, ddl: str, meta_table: str) -> tuple[sqlite3.Conn
     stored = connection.execute(
         f"SELECT value FROM {meta_table} WHERE key = 'schema_version'"
     ).fetchone()
-    if stored is None or int(stored["value"]) != SCHEMA_VERSION:
-        found = "none" if stored is None else stored["value"]
+    if stored is None:
+        # A crash between DDL creation and the meta insert leaves tables
+        # with no version row. That is completable only when every domain
+        # table is still empty; otherwise startup refuses.
+        rows = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            " AND name != ?",
+            (meta_table,),
+        ).fetchall()
+        for row in rows:
+            count = connection.execute(f'SELECT count(*) FROM "{row["name"]}"').fetchone()[0]
+            if count:
+                raise SchemaVersionError(
+                    f"{path}: tables hold data but {meta_table} has no schema_version;"
+                    " refusing startup"
+                )
+        with _tx(connection):
+            connection.execute(
+                f"INSERT INTO {meta_table} (key, value) VALUES ('schema_version', ?)",
+                (str(SCHEMA_VERSION),),
+            )
+            connection.execute(
+                f"INSERT INTO {meta_table} (key, value) VALUES ('schema_digest', ?)", (digest,)
+            )
+        return connection, True  # completed initialization behaves as fresh
+    if int(stored["value"]) != SCHEMA_VERSION:
         raise SchemaVersionError(
-            f"{path}: schema version {found} is not the known version {SCHEMA_VERSION}"
+            f"{path}: schema version {stored['value']} is not the known version {SCHEMA_VERSION}"
         )
     stored_digest = connection.execute(
         f"SELECT value FROM {meta_table} WHERE key = 'schema_digest'"
@@ -461,6 +486,7 @@ class CoreStore(_Domain):
                 " AND revision < ?",
                 (record.id, record.revision),
             )
+            payload_text = canonical_json_bytes(payload).decode("utf-8")
             try:
                 connection.execute(
                     "INSERT INTO core_records (record_id, revision, record_type, payload_json,"
@@ -469,14 +495,24 @@ class CoreStore(_Domain):
                         record.id,
                         record.revision,
                         record.TYPE_NAME,
-                        canonical_json_bytes(payload).decode("utf-8"),
+                        payload_text,
                         record.created_at,
                     ),
                 )
-            except sqlite3.IntegrityError as exc:
-                raise RecordConflictError(
-                    f"record {record.id} revision {record.revision} already exists"
-                ) from exc
+            except sqlite3.IntegrityError:
+                # History is never edited — but a crash-replayed step
+                # regenerates byte-identical records, and re-accepting the
+                # same fact is idempotent (§7 replay dedup). Identical bytes
+                # pass silently; different bytes are a CONFLICT.
+                existing = connection.execute(
+                    "SELECT payload_json FROM core_records WHERE record_id = ? AND revision = ?",
+                    (record.id, record.revision),
+                ).fetchone()
+                if existing is None or existing["payload_json"] != payload_text:
+                    raise RecordConflictError(
+                        f"record {record.id} revision {record.revision} already exists"
+                        " with different bytes"
+                    ) from None
 
     def get_record(self, record_id: str, revision: int | None = None) -> Record | None:
         if revision is None:
@@ -612,6 +648,11 @@ class CoreStore(_Domain):
         for value in (operation, entity_ref, reason_code):
             if not isinstance(value, str) or len(value) > 128 or "\n" in value:
                 raise ValidationError("audit fields are bounded single-line strings", path="audit")
+        if reason_code not in REASON_CODES:
+            raise ValidationError(
+                f"audit reason code {reason_code!r} is outside the closed registry",
+                path="reason_code",
+            )
         with _tx(self._conn):
             self._conn.execute(
                 "INSERT INTO core_audit (operation, entity_ref, reason_code, version_refs, at_ms)"
@@ -711,10 +752,13 @@ class CoreStore(_Domain):
 
     # -- ingestion ------------------------------------------------------------
 
-    def _ingest_row_exists(self, consumer_id: str, source_event_id: str) -> sqlite3.Row | None:
+    def _ingest_row_exists(
+        self, consumer_id: str, source_event_id: str, source_revision: int
+    ) -> sqlite3.Row | None:
         return self._conn.execute(
-            "SELECT journal_seq FROM core_ingestion WHERE consumer_id = ? AND source_event_id = ?",
-            (consumer_id, source_event_id),
+            "SELECT journal_seq FROM core_ingestion WHERE consumer_id = ?"
+            " AND source_event_id = ? AND source_revision = ?",
+            (consumer_id, source_event_id, source_revision),
         ).fetchone()
 
     def _insert_ingestion_row(
@@ -862,8 +906,8 @@ class TransportStore(_Domain):
     ) -> None:
         with _tx(self._conn) as connection:
             existing = connection.execute(
-                "SELECT proposal_revision, supersession_ack FROM transport_outbox"
-                " WHERE logical_effect_id = ?",
+                "SELECT proposal_revision, proposal_digest, payload_ref, supersession_ack"
+                " FROM transport_outbox WHERE logical_effect_id = ?",
                 (logical_effect_id,),
             ).fetchone()
             if existing is not None:
@@ -887,9 +931,13 @@ class TransportStore(_Domain):
                         ),
                     )
                     return
+                if (
+                    existing["proposal_digest"] == proposal_digest
+                    and existing["payload_ref"] == payload_ref
+                ):
+                    return  # exact duplicate submit: current state, no error
                 raise RecordConflictError(
-                    f"effect {logical_effect_id}: exact duplicate submit returns current state;"
-                    " conflicting bytes are a CONFLICT"
+                    f"effect {logical_effect_id}: same revision with different bytes is a CONFLICT"
                 )
             connection.execute(
                 "INSERT INTO transport_outbox (logical_effect_id, proposal_revision,"
@@ -1080,7 +1128,9 @@ def ingest_batch(
                     )
                     gap_filled.append(seq)
                     cursor = seq
-            existing = core._ingest_row_exists(consumer_id, entry.source_event_id)
+            existing = core._ingest_row_exists(
+                consumer_id, entry.source_event_id, entry.source_revision
+            )
             if existing is not None:
                 if existing["journal_seq"] != entry.journal_seq:
                     raise RecordConflictError(

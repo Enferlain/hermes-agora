@@ -136,6 +136,28 @@ def test_deleted_retained_entry_becomes_explicit_gap(
     assert core.work_by_trigger_key("turn:gap:2") is None
 
 
+def test_revised_source_event_ingests_normally(
+    stores_pair: tuple[stores.CoreStore, stores.TransportStore],
+) -> None:
+    core, transport = stores_pair
+    first = entry(1)
+    revised = stores.JournalEntry(
+        journal_seq=2,
+        source_event_id="evt:1",
+        source_revision=2,
+        kind="MESSAGE_UPDATED",
+        payload_ref="payload:evt:1:r2",
+        fragment_refs=("fragment:evt:1",),
+        recovery="COMPLETE",
+    )
+    transport.append_events((first, revised))
+    receipt = stores.ingest_batch(core, transport, consumer_id=CONSUMER, ingested_at=UTC)
+    assert receipt.applied == (1, 2)
+    assert receipt.durable_cursor == 2
+    assert core.work_by_trigger_key("turn:evt:1") is not None
+    assert stores.check_invariants(core, transport) == []
+
+
 def test_same_event_at_different_seq_is_conflict(
     stores_pair: tuple[stores.CoreStore, stores.TransportStore],
 ) -> None:

@@ -30,8 +30,15 @@ def test_clock_cannot_move_backwards() -> None:
     with pytest.raises(ClockError):
         clock.advance_ms(-1)
     with pytest.raises(ClockError):
+        clock.advance_ms(0)  # non-positive deltas fail
+    with pytest.raises(ClockError):
         clock.advance_to(50)
     assert clock.now_ms() == 100
+
+
+def test_clock_rejects_negative_origin() -> None:
+    with pytest.raises(ClockError):
+        VirtualClock("2026-10-10T00:00:00Z", start_ms=-5)
 
 
 def test_display_time_is_a_pure_function_of_virtual_ms() -> None:

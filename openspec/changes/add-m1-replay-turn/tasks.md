@@ -19,10 +19,10 @@
 
 ## 4. Spine closure
 
-- [ ] 4.1 Full gates green (`uv run pytest`, `uv run ruff check .`, `uv run ruff format --check agora tests`, `uv run ty check`), CHANGELOG dated entry, `bd close` the spine task, and a review pass by a review agent with findings addressed. Verify: all commands exit 0 and the review findings log is empty or addressed.
+- [x] 4.1 Full gates green (`uv run pytest`, `uv run ruff check .`, `uv run ruff format --check agora tests`, `uv run ty check`), CHANGELOG dated entry, `bd close` the spine task, and a review pass by a review agent with findings addressed. Verify: all commands exit 0 and the review findings log is empty or addressed.
 
 ## 5. Whole-turn wiring (next task: `hermes-agora-043.2`)
 
-- [ ] 5.1 Scripted ports + coordinator + context/memory stub-with-real-records: event→work→episode turn with budgets from the run manifest. Verify: deterministic ingest-to-decision trace for one event.
-- [ ] 5.2 Ordinary CommitGate routing (NONE path + UNSUPPORTED denials) and fake sidecar/world with durable visibility evidence. Verify: speak trace and unsupported-effect denial tests pass.
-- [ ] 5.3 Four outcome demonstrations (message, reaction, explicit no action, timer-driven initiation) via a replay CLI command; restart-continuation smoke. Verify: M1 exit evidence — expected observer trace and durable state from a deterministic replay command.
+- [x] 5.1 Scripted ports + coordinator + context/memory stub-with-real-records: event→work→episode turn with budgets from the run manifest. Verify: deterministic ingest-to-decision trace for one event.
+- [x] 5.2 Ordinary CommitGate routing (NONE path + UNSUPPORTED denials) and fake sidecar/world with durable visibility evidence. Verify: speak trace and unsupported-effect denial tests pass.
+- [x] 5.3 Four outcome demonstrations (message, reaction, explicit no action, timer-driven initiation) via a replay CLI command; restart-continuation smoke. Verify: M1 exit evidence — expected observer trace and durable state from a deterministic replay command.

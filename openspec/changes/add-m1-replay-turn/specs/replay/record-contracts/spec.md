@@ -75,5 +75,5 @@ Inbound event kinds are exactly the closed set the handoff lists; unlisted kinds
 
 #### Scenario: Unlisted event kind
 
-- **WHEN** an event arrives with a kind outside the closed set
-- **THEN** it is rejected with UNSUPPORTED rather than remapped
+- **WHEN** record data arrives with an event kind outside the closed set
+- **THEN** it fails record validation as an unknown enum value (INVALID_SCHEMA) rather than being remapped; operation-level unsupported kinds (e.g. an effect kind the slice does not enable) are refused with UNSUPPORTED at the commit boundary

@@ -2297,7 +2297,7 @@ def _reject_forbidden_keys(value: object, path: str = "$") -> None:
                     path=path,
                 )
             _reject_forbidden_keys(item, f"{path}.{key}" if isinstance(key, str) else path)
-    elif isinstance(value, list):
+    elif isinstance(value, list | tuple):
         for index, item in enumerate(value):
             _reject_forbidden_keys(item, f"{path}[{index}]")
 
@@ -2473,6 +2473,28 @@ MainStep = (
 )
 
 
+_REQUIRED_STEP_FIELDS: dict[MainStepKind, tuple[str, ...]] = {
+    MainStepKind.PARTICIPATE: ("mode",),
+    MainStepKind.REQUEST_ACCESS: ("request",),
+    MainStepKind.PROPOSE_MEMORY: (
+        "assertion_text",
+        "requested_stage",
+        "requested_scope_kind",
+        "scope_ref",
+    ),
+    MainStepKind.ADOPT_PREFERENCE: ("preference_statement",),
+    MainStepKind.CREATE_INTENT: ("goal_text", "purpose_class", "allowed_destination_ids"),
+    MainStepKind.SUBMIT_PLAN: ("intent_ref", "disposition", "effects"),
+    MainStepKind.FINISH: ("outcome",),
+}
+
+
+def _require_step_fields(data: dict[str, Any], kind: MainStepKind) -> None:
+    for field_name in _REQUIRED_STEP_FIELDS[kind]:
+        if field_name not in data:
+            raise ValidationError(f"{kind.value} requires field {field_name!r}", path=field_name)
+
+
 def parse_model_step(data: object) -> MainStep:
     """Parse a model-facing decision payload into a typed MainStep.
 
@@ -2490,6 +2512,7 @@ def parse_model_step(data: object) -> MainStep:
         step_kind = MainStepKind(kind)
     except ValueError:
         raise ValidationError(f"unknown step kind {kind!r}", path="kind") from None
+    _require_step_fields(data, step_kind)
     if step_kind is MainStepKind.PARTICIPATE:
         return ModelParticipateStep(
             kind=step_kind,
@@ -2501,26 +2524,26 @@ def parse_model_step(data: object) -> MainStep:
     if step_kind is MainStepKind.PROPOSE_MEMORY:
         return ModelProposeMemoryStep(
             kind=step_kind,
-            assertion_text=data.get("assertion_text", ""),
+            assertion_text=data["assertion_text"],
             source_refs=tuple(RecordRef.from_payload(item) for item in data.get("source_refs", ())),
             requested_stage=check_enum(data.get("requested_stage"), MemoryStage, "requested_stage"),
             requested_scope_kind=check_enum(
                 data.get("requested_scope_kind"), ScopeKind, "requested_scope_kind"
             ),
-            scope_ref=data.get("scope_ref", ""),
+            scope_ref=data["scope_ref"],
             existing_memory_ref=RecordRef.from_payload(data["existing_memory_ref"])
             if data.get("existing_memory_ref")
             else None,
         )
     if step_kind is MainStepKind.ADOPT_PREFERENCE:
         return ModelAdoptPreferenceStep(
-            kind=step_kind, preference_statement=data.get("preference_statement", "")
+            kind=step_kind, preference_statement=data["preference_statement"]
         )
     if step_kind is MainStepKind.CREATE_INTENT:
         return ModelCreateIntentStep(
             kind=step_kind,
-            goal_text=data.get("goal_text", ""),
-            purpose_class=data.get("purpose_class", ""),
+            goal_text=data["goal_text"],
+            purpose_class=data["purpose_class"],
             allowed_destination_ids=tuple(data.get("allowed_destination_ids", ())),
             due_at=data.get("due_at"),
             expires_at=data.get("expires_at"),

@@ -32,14 +32,16 @@ class VirtualClock:
 
     def __init__(self, anchor_rfc3339: str, start_ms: int = 0) -> None:
         self._anchor = _parse_utc(anchor_rfc3339)
-        self._now_ms = start_ms if start_ms >= 0 else 0
+        if start_ms < 0:
+            raise ClockError(f"clock origin cannot be negative (start_ms {start_ms})")
+        self._now_ms = start_ms
 
     def now_ms(self) -> int:
         return self._now_ms
 
     def advance_ms(self, delta_ms: int) -> int:
-        if delta_ms < 0:
-            raise ClockError(f"virtual clock cannot move backwards (delta {delta_ms}ms)")
+        if delta_ms <= 0:
+            raise ClockError(f"virtual clock advance requires a positive delta (got {delta_ms}ms)")
         self._now_ms += delta_ms
         return self._now_ms
 
@@ -164,6 +166,25 @@ class PerceptionSignalData:
     reply_flag: bool
     status: str
     probabilities: tuple[tuple[str, float | None], ...]
+
+
+class ScriptedMainModel:
+    """Deterministic main port: returns scripted steps in order.
+
+    Determinism rule: the same call index always returns the same step, so
+    a crash between model and acceptance replays identically. Running past
+    the script is an error, never invention."""
+
+    def __init__(self, steps: Sequence[MainStep]) -> None:
+        self._steps = tuple(steps)
+        self._calls = 0
+
+    def step(self, envelope: Any) -> MainStep:
+        index = self._calls
+        self._calls += 1
+        if index >= len(self._steps):
+            raise RuntimeError(f"scripted main model exhausted after {len(self._steps)} steps")
+        return self._steps[index]
 
 
 class MainModelPort(Protocol):

@@ -88,11 +88,24 @@ def test_records_append_only_with_current_flip(core: stores.CoreStore) -> None:
     assert core.get_record("principal:agent") == make_principal(2)
 
 
-def test_duplicate_revision_is_conflict_not_edit(core: stores.CoreStore) -> None:
+def test_duplicate_revision_rules(core: stores.CoreStore) -> None:
     core.put_record(make_principal(1))
-    with pytest.raises(stores.RecordConflictError):
-        core.put_record(make_principal(1))
+    # byte-identical re-insert is idempotent (crash replay re-acceptance)
+    core.put_record(make_principal(1))
     assert core.record_revisions("principal:agent") == (1,)
+    # different bytes under the same (id, revision) are a conflict, not an edit
+    different = Principal(
+        id="principal:agent",
+        revision=1,
+        created_at=UTC,
+        kind=PrincipalKind.AGENT,
+        verified_bindings=(),
+        claimed_aliases=("someone-else",),
+    )
+    with pytest.raises(stores.RecordConflictError):
+        core.put_record(different)
+    assert core.record_revisions("principal:agent") == (1,)
+    assert core.get_record("principal:agent") == make_principal(1)
 
 
 def test_payload_store_purges_bytes_retaining_metadata(core: stores.CoreStore) -> None:
@@ -344,6 +357,60 @@ def test_failed_confirmed_single_retry_path(tmp_path: Path) -> None:
     transport.transition_outbox("effect:1", "QUEUED")  # §6.2 single retry
     with pytest.raises(stores.TransitionError):
         transport.transition_outbox("effect:1", "FAILED_CONFIRMED")
+
+
+def test_exact_duplicate_enqueue_returns_current_state(tmp_path: Path) -> None:
+    transport = stores.TransportStore(tmp_path / "transport.sqlite")
+    transport.enqueue_effect(
+        logical_effect_id="effect:1",
+        proposal_revision=1,
+        proposal_digest="0" * 64,
+        payload_ref="payload:effect:1",
+        auth_ref="auth:1",
+        generation=0,
+    )
+    transport.enqueue_effect(  # byte-identical: current state, no error
+        logical_effect_id="effect:1",
+        proposal_revision=1,
+        proposal_digest="0" * 64,
+        payload_ref="payload:effect:1",
+        auth_ref="auth:1",
+        generation=0,
+    )
+    assert transport.outbox_state("effect:1") == "QUEUED"
+    with pytest.raises(stores.RecordConflictError):
+        transport.enqueue_effect(
+            logical_effect_id="effect:1",
+            proposal_revision=1,
+            proposal_digest="1" * 64,
+            payload_ref="payload:effect:1",
+            auth_ref="auth:1",
+            generation=0,
+        )
+
+
+def test_audit_rejects_non_registry_reason_codes(core: stores.CoreStore) -> None:
+    with pytest.raises(ValidationError):
+        core.audit(
+            operation="access",
+            entity_ref="request:1",
+            reason_code="reviewer seemed uneasy",
+            at_ms=1,
+        )
+
+
+def test_half_created_store_completes_initialization(tmp_path: Path) -> None:
+    import agora.stores as stores_module
+
+    path = tmp_path / "core.sqlite"
+    connection = sqlite3.connect(path, isolation_level=None)
+    connection.executescript(stores_module.CORE_SCHEMA_DDL)  # crash before meta rows
+    connection.commit()
+    connection.close()
+    core = stores.CoreStore(path)  # completes init instead of bricking
+    assert core.runtime_epoch == 0
+    core.put_record(make_principal(1))
+    assert core.get_record("principal:agent") == make_principal(1)
 
 
 def test_attempts_are_immutable_rows(tmp_path: Path) -> None:

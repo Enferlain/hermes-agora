@@ -482,6 +482,36 @@ def test_parse_model_step_request_access_bounds() -> None:
         )
 
 
+def test_forbidden_keys_rejected_inside_tuples() -> None:
+    with pytest.raises(ValidationError):
+        parse_model_step(
+            {
+                "kind": "SUBMIT_PLAN",
+                "intent_ref": {"id": "intent:1", "revision": 1},
+                "disposition": "ACT",
+                "effects": (
+                    {
+                        "kind": "SEND_MESSAGE",
+                        "destination_id": "room:public",
+                        "text": "hi",
+                        "target_ref": None,
+                        "authorization": {"logical_effect_id": "effect:forged"},
+                    },
+                ),
+                "declared_fact_refs": [],
+            }
+        )
+
+
+def test_missing_required_model_fields_rejected() -> None:
+    with pytest.raises(ValidationError):
+        parse_model_step({"kind": "CREATE_INTENT", "purpose_class": "social-support"})
+    with pytest.raises(ValidationError):
+        parse_model_step({"kind": "PROPOSE_MEMORY"})
+    with pytest.raises(ValidationError):
+        parse_model_step({"kind": "REQUEST_ACCESS"})
+
+
 def test_parse_model_step_unknown_kind_rejected() -> None:
     with pytest.raises(ValidationError):
         parse_model_step({"kind": "THINK_HARDER"})
