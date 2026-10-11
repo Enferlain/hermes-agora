@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Promoted `agora/contracts.py` (~2,600 lines) to the `agora/contracts/` package (errors, enums, values, canonical, records, codec, model_steps) per the structure convention; the `from agora.contracts import X` surface is unchanged and all 110 tests pass without a single test-import edit.
 - Added the package structure convention (implementation note): handoff §2 boundary names are permanent top-level modules; modules promote to re-exporting packages on a growth trigger; contracts/ is the first planned promotion at M2 start.
 
 - Implemented the M1 whole-turn wiring: coordinator turn loop with manifest budgets, compare-and-set step acceptance, and the crash checkpoint between model and acceptance; context/memory snapshot assembly with CONTEXT_ASSEMBLY and MAIN producer coverage; CommitGate with code checks, UNSUPPORTED/HARD_DENY determinations, and versioned CommitAuthorization; fake sidecar with PREPARED attempts, single-use epoch/generation/expiry-fenced leases, durable DISPATCH_STARTED linearization, world dispatch, conservative UNKNOWN, and reconciliation; fake world as independent durable visibility evidence; scripted main model port; replay runner + `agora replay` CLI with validated run manifests parsed through the model boundary.
