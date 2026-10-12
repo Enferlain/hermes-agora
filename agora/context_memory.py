@@ -39,11 +39,16 @@ from agora.contracts import (
     ExposureClass,
     IntendedUse,
     Intent,
+    MemoryAccessRequest,
+    MemoryAccessResult,
+    MemoryView,
     ModelCallEnvelope,
     ProducerCoverage,
     ProducerKind,
     ReasonCode,
+    Record,
     RecordRef,
+    RecordStatus,
     RequestedPrecision,
     ResourceOperation,
     ResourcePolicy,
@@ -374,6 +379,191 @@ class ContextMemory:
     def _trip(self, checkpoint: CrashCheckpoint) -> None:
         if self.injector is not None:
             self.injector.trip(checkpoint)
+
+    # -- protected access (M2 design D1: the record-building shell) ---------
+
+    def _current_of[R: Record](self, cls: type[R]) -> tuple[R, ...]:
+        """Current revisions of one record type, in id order (deterministic)."""
+        rows = self.core._conn.execute(
+            "SELECT record_id, revision FROM core_records WHERE record_type = ?"
+            " AND is_current = 1 ORDER BY record_id",
+            (cls.TYPE_NAME,),
+        ).fetchall()
+        return tuple(
+            record
+            for row in rows
+            if isinstance(record := self.core.get_record(row["record_id"], row["revision"]), cls)
+        )
+
+    def _fragment_or_none(self, record_id: str) -> ContentFragment | None:
+        record = self.core.get_record(record_id)
+        return record if isinstance(record, ContentFragment) else None
+
+    def request_access(self, request: MemoryAccessRequest) -> MemoryAccessResult:
+        """Persist the request (necessity text out-of-line), evaluate
+        authority independently, and persist the typed result — plus, when
+        granted, the restricted MemoryView citing its authorization chain
+        and inherited commitments. The evaluation itself never sees payload
+        bytes; a non-GRANTED result persists no view, no permitted uses,
+        and no authorizations (handoff §5, D07)."""
+        now = self.clock.now_rfc3339()
+        self.core.put_record(request, text_field_refs={"necessity_text": "necessity_payload_ref"})
+        intent = self.core.get_record(request.intent_ref.id, request.intent_ref.revision)
+        audience = self.core.get_record(request.audience_ref.id, request.audience_ref.revision)
+        all_policies = self._current_of(ResourcePolicy)
+        all_bindings = self._current_of(AuthorityBinding)
+        all_authorizations = self._current_of(UseAuthorization)
+        all_commitments = self._current_of(Commitment)
+
+        evaluator = AuthorityEvaluator()
+        if request.resource_id is not None:
+            cases = (
+                EvaluationInput(
+                    intended_use=request.intended_use,
+                    requested_precision=request.requested_precision,
+                    transform_id=request.transform_id,
+                    intent=intent if isinstance(intent, Intent) else None,
+                    audience=audience if isinstance(audience, AudienceSnapshot) else None,
+                    resource=self._fragment_or_none(request.resource_id),
+                    policies=tuple(p for p in all_policies if p.resource_id == request.resource_id),
+                    bindings=all_bindings,
+                    authorizations=all_authorizations,
+                    commitments=all_commitments,
+                    now=now,
+                ),
+            )
+            class_resource_id = request.resource_id
+        else:
+            assert request.data_class is not None
+            members = tuple(
+                policy for policy in all_policies if policy.data_class == request.data_class
+            )
+            cases = tuple(
+                EvaluationInput(
+                    intended_use=request.intended_use,
+                    requested_precision=request.requested_precision,
+                    transform_id=request.transform_id,
+                    intent=intent if isinstance(intent, Intent) else None,
+                    audience=audience if isinstance(audience, AudienceSnapshot) else None,
+                    resource=self._fragment_or_none(policy.resource_id),
+                    policies=(policy,),
+                    bindings=all_bindings,
+                    authorizations=all_authorizations,
+                    commitments=all_commitments,
+                    now=now,
+                )
+                for policy in members
+            )
+            class_resource_id = request.data_class
+        assert class_resource_id is not None
+        verdict = (
+            evaluator.evaluate(cases[0])
+            if request.resource_id is not None
+            else evaluator.evaluate_class(cases)
+        )
+
+        coverage = ProducerCoverage(
+            id=f"coverage:access:{request.request_id}",
+            revision=1,
+            created_at=now,
+            producer_kind=ProducerKind.CONTEXT_ASSEMBLY,
+            input_fragment_refs=tuple(
+                RecordRef(id=case.resource.id, revision=case.resource.revision)
+                for case in cases
+                if case.resource is not None
+            ),
+            input_view_refs=(),
+            input_intent_refs=(request.intent_ref,),
+            input_policy_refs=tuple(
+                RecordRef(id=policy.id, revision=policy.revision)
+                for case in cases
+                for policy in case.policies
+            ),
+            sink_ref=None,
+            call_id=f"access:{request.request_id}",
+            runtime_epoch=self.core.runtime_epoch,
+        )
+
+        granted = verdict.status == AccessStatus.GRANTED
+        view: MemoryView | None = None
+        if granted:
+            authorization_refs = tuple(
+                RecordRef(id=auth.id, revision=auth.revision) for auth in verdict.authorizations
+            )
+            audience_bounds = tuple(
+                sorted(
+                    {
+                        bound
+                        for auth in verdict.authorizations
+                        for bound in auth.audience_class_bounds
+                    }
+                )
+            )
+            valid_until = min(
+                (
+                    auth.valid_until
+                    for auth in verdict.authorizations
+                    if auth.valid_until is not None
+                ),
+                default=None,
+            )
+            view = MemoryView(
+                id=f"view:{request.request_id}",
+                revision=1,
+                created_at=now,
+                resource_id=class_resource_id,
+                returned_fragment_refs=tuple(
+                    RecordRef(id=case.resource.id, revision=case.resource.revision)
+                    for case in cases
+                    if case.resource is not None
+                ),
+                authorization_refs=authorization_refs,
+                transform_certificate_ref=None,
+                producer_coverage_ref=RecordRef(id=coverage.id, revision=coverage.revision),
+                precision=request.requested_precision,
+                inherited_commitment_refs=tuple(
+                    RecordRef(id=c.id, revision=c.revision) for c in verdict.inherited_commitments
+                ),
+                permitted_uses=verdict.permitted_uses,
+                audience_bounds=audience_bounds,
+                valid_until=valid_until,
+                status=RecordStatus.ACTIVE,
+            )
+        result = MemoryAccessResult(
+            id=f"result:{request.request_id}",
+            revision=1,
+            created_at=now,
+            request_id=request.request_id,
+            access_status=verdict.status,
+            view_kind=verdict.view_kind,
+            view_ref=RecordRef(id=view.id, revision=view.revision) if view else None,
+            reason_codes=verdict.reason_codes,
+            safe_feedback_template_id=None,
+            permitted_uses=verdict.permitted_uses,
+            producer_coverage_ref=RecordRef(id=coverage.id, revision=coverage.revision),
+            transform_certificate_ref=None,
+            authorization_refs=tuple(
+                RecordRef(id=auth.id, revision=auth.revision) for auth in verdict.authorizations
+            )
+            if granted
+            else (),
+            inherited_commitment_refs=tuple(
+                RecordRef(id=c.id, revision=c.revision) for c in verdict.inherited_commitments
+            )
+            if granted
+            else (),
+        )
+        batch: tuple[Record, ...] = (coverage, view, result) if view else (coverage, result)
+        self.core.put_records(batch)
+        if not granted and verdict.reason_codes:
+            self.core.audit(
+                operation="access",
+                entity_ref=result.id,
+                reason_code=verdict.reason_codes[0].value,
+                version_refs=(request.id,),
+                at_ms=self.clock.now_ms(),
+            )
+        return result
 
     def eligible_episode_fragments(self, episode_ref: RecordRef) -> tuple[RecordRef, ...]:
         """Recent ingested fragments for an episode, newest last, within the

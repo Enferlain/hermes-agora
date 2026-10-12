@@ -44,5 +44,9 @@ line-ending = "auto"
 addopts = "-q"
 testpaths = ["tests"]
 
+[tool.ty.src]
+include = ["agora", "tests"]
+exclude = [".claude"]
+
 [tool.ty.environment]
 python-version = "3.14"
