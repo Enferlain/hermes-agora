@@ -199,6 +199,20 @@ def five_class_registries() -> dict[str, Any]:
                 "resource_id": JOINT_RESOURCE,
                 "evidence": "fragment:evidence:bindings",
             },
+            {
+                "id": "binding:human-joint-disclosure",
+                "issuer": HUMAN,
+                "domain": "DISCLOSURE",
+                "resource_id": JOINT_RESOURCE,
+                "evidence": "fragment:evidence:bindings",
+            },
+            {
+                "id": "binding:third-joint-disclosure",
+                "issuer": THIRD_PARTY,
+                "domain": "DISCLOSURE",
+                "resource_id": JOINT_RESOURCE,
+                "evidence": "fragment:evidence:bindings",
+            },
         ],
         "authorizations": [
             {
@@ -216,7 +230,12 @@ def five_class_registries() -> dict[str, Any]:
                 "id": "use:joint-expression",
                 "resource_id": JOINT_RESOURCE,
                 "issuers": [HUMAN, THIRD_PARTY],
-                "bindings": ["binding:human-joint", "binding:third-joint"],
+                "bindings": [
+                    "binding:human-joint",
+                    "binding:third-joint",
+                    "binding:human-joint-disclosure",
+                    "binding:third-joint-disclosure",
+                ],
                 "operations": ["READ", "EXPRESS"],
                 "purpose_classes": ["project-coordination"],
                 "audience_bounds": ["room:public"],
