@@ -537,9 +537,13 @@ class CoreStore(_Domain):
                     path=field_name,
                 )
             payload_id = f"payload:{record.TYPE_NAME}:{record.id}:{record.revision}:{field_name}"
+            # Idempotent under crash replay: a re-swapped identical record
+            # re-inserts the same payload id; differing text under the same
+            # (id, revision) fails the record conflict check below anyway.
             connection.execute(
                 "INSERT INTO core_payloads (payload_id, owner_ref, data, sensitivity_refs,"
-                " commitment_refs, expires_at_ms, status) VALUES (?, ?, ?, ?, ?, NULL, ?)",
+                " commitment_refs, expires_at_ms, status) VALUES (?, ?, ?, ?, ?, NULL, ?)"
+                " ON CONFLICT(payload_id) DO NOTHING",
                 (payload_id, owner, text, "[]", "[]", PayloadStatus.ACTIVE.value),
             )
             payload[field_name] = None

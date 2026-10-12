@@ -58,7 +58,7 @@ from agora.coordinator import Coordinator
 from agora.fake_sidecar import FakeSidecar, FakeWorld
 from agora.ports import FaultInjector, ScriptedMainModel, VirtualClock
 from agora.stores import CoreStore, JournalEntry, TransportStore
-from agora.transforms import validate_transform_parameters
+from agora.transforms import transform_spec, validate_transform_parameters
 
 MANIFEST_VERSION = 2
 
@@ -495,15 +495,22 @@ def seed_registries(core: CoreStore, clock: VirtualClock, registries: Registries
             resolve(principal_id, f"commitment {seed.id} principal")
         for evidence_id in seed.policy_evidence:
             resolve(evidence_id, f"commitment {seed.id} policy_evidence")
+        if seed.resource_id:
+            # resource_id is a plain string field, so the store's typed-ref
+            # backstop cannot catch it — resolve it here (review MINOR).
+            resolve(seed.resource_id, f"commitment {seed.id} resource_id")
     for seed in registries.policies:
         for principal_id in seed.eligible_issuers:
             resolve(principal_id, f"policy {seed.id} eligible_issuers")
         for cited in (*seed.commitments, seed.resource_id):
             if cited:
                 resolve(cited, f"policy {seed.id} reference")
+        for transform_id in seed.allowed_transforms:
+            transform_spec(transform_id)  # unknown registry transform ids fail
     for seed in registries.bindings:
         resolve(seed.issuer, f"binding {seed.id} issuer")
         resolve(seed.evidence, f"binding {seed.id} evidence")
+        resolve(seed.resource_id, f"binding {seed.id} resource_id")
         if seed.delegated_from:
             resolve(seed.delegated_from, f"binding {seed.id} delegated_from")
     for seed in registries.authorizations:
@@ -512,6 +519,8 @@ def seed_registries(core: CoreStore, clock: VirtualClock, registries: Registries
         for binding_id in seed.bindings:
             resolve(binding_id, f"authorization {seed.id} bindings")
         resolve(seed.resource_id, f"authorization {seed.id} resource_id")
+        for transform_id in seed.transforms:
+            transform_spec(transform_id)  # unknown registry transform ids fail
 
     principals = [
         Principal(

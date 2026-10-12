@@ -31,7 +31,15 @@ from agora.contracts import (
     RecordRef,
     SourceKind,
 )
-from agora.contracts.codec import _CODEC_REF, _CODEC_SEQ, _annotation_codec, _field_plan
+from agora.contracts.codec import (
+    _CODEC_NESTED,
+    _CODEC_PAIR,
+    _CODEC_PRIMITIVE,
+    _CODEC_REF,
+    _CODEC_SEQ,
+    _annotation_codec,
+    _field_plan,
+)
 from agora.contracts.records import Record
 from agora.contracts.values import Provenance as ProvenanceValue
 from agora.contracts.values import RuntimeOrigin as RuntimeOriginValue
@@ -68,6 +76,31 @@ def test_ref_targets_name_only_real_record_types() -> None:
 
 def test_ref_targets_hold_no_orphan_classes() -> None:
     assert set(REF_TARGETS) <= set(ALL_RECORD_TYPES)
+
+
+def test_no_record_field_escapes_the_ref_walker() -> None:
+    """Refs may only appear where the walker looks: top-level fields or the
+    two known value objects. A nested-record field (or any new shape) fails
+    here loudly instead of silently skipping verification."""
+    from agora.contracts.codec import (
+        _CODEC_ENUM,
+        _CODEC_ORIGIN,
+        _CODEC_PROVENANCE,
+    )
+
+    known = {
+        _CODEC_PRIMITIVE,
+        _CODEC_ENUM,
+        _CODEC_REF,
+        _CODEC_ORIGIN,
+        _CODEC_PROVENANCE,
+        _CODEC_PAIR,
+        _CODEC_SEQ,
+    }
+    for cls in ALL_RECORD_TYPES:
+        for name, (kind, _param) in _field_plan(cls).items():
+            assert kind in known, f"{cls.TYPE_NAME}.{name} has unchecked kind {kind!r}"
+            assert kind != _CODEC_NESTED, f"{cls.TYPE_NAME}.{name} nests a record"
 
 
 @pytest.mark.parametrize(

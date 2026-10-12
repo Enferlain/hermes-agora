@@ -128,6 +128,24 @@ def test_unregistered_transform_id_fails_at_parse(tmp_path: Path) -> None:
         RunManifest.from_payload(payload)
 
 
+def test_unknown_string_resource_reference_fails_startup(tmp_path: Path) -> None:
+    """Commitment/Binding resource_id are plain strings the typed-ref
+    backstop cannot see; the seeding resolve pass must catch them."""
+    registries = five_class_registries()
+    registries["bindings"][0]["resource_id"] = "fragment:res:finnce"  # typo
+    manifest = RunManifest.from_payload(manifest_with_registries(registries))
+    with pytest.raises(ManifestError, match="fragment:res:finnce"):
+        ReplayRunner(manifest, tmp_path / "run")
+
+
+def test_policy_citing_unregistered_transform_fails_startup(tmp_path: Path) -> None:
+    registries = five_class_registries()
+    registries["policies"][0]["allowed_transforms"] = ["TRANSFORM:GHOST"]
+    manifest = RunManifest.from_payload(manifest_with_registries(registries))
+    with pytest.raises(Exception, match="fixed registry"):
+        ReplayRunner(manifest, tmp_path / "run")
+
+
 def test_transform_parameter_set_must_match_the_spec(tmp_path: Path) -> None:
     registries = five_class_registries()
     registries["transforms"][0]["parameters"] = [["price", 30], ["headroom", 5]]
