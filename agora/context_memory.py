@@ -46,6 +46,8 @@ from agora.contracts import (
     Intent,
     MemoryAccessRequest,
     MemoryAccessResult,
+    MemoryRecord,
+    MemoryStage,
     MemoryView,
     ModelCallEnvelope,
     Pair,
@@ -59,6 +61,7 @@ from agora.contracts import (
     RequestedPrecision,
     ResourceOperation,
     ResourcePolicy,
+    ScopeKind,
     SnapshotStatus,
     SourceKind,
     TransformCertificate,
@@ -736,16 +739,48 @@ class ContextMemory:
                 ref = self.core.current_ref(fragment_id)
                 if ref is None:
                     continue
-                payload_row = self.core._conn.execute(
-                    "SELECT length(data) AS n FROM core_payloads WHERE payload_id = ?",
-                    (f"payload:fragment:{fragment_id}",),
-                ).fetchone()
-                size = payload_row["n"] if payload_row is not None else 0
+                size = self._payload_size(f"payload:fragment:{fragment_id}")
                 if total + size > MAX_CONTEXT_BYTES:
                     continue  # omit excess whole fragments, keep metadata
                 total += size
                 selected.append(ref)
         return tuple(reversed(selected))
+
+    def _eligible_memory_fragments(self, destination_id: str) -> tuple[RecordRef, ...]:
+        """Eligible memory assertion fragments for one destination scope,
+        within the shared context byte budget. Eligibility is filtered on
+        the scope index before any payload is read; deterministically in
+        memory id order."""
+        memory_refs = self.core.eligible_memory_refs(
+            scope_kind=ScopeKind.ROOM.value,
+            scope_ref=destination_id,
+            now_ms=self.clock.now_ms(),
+            stages=frozenset({MemoryStage.SOCIAL, MemoryStage.CANDIDATE, MemoryStage.DURABLE}),
+        )
+        selected: list[RecordRef] = []
+        total = 0
+        for memory_ref in memory_refs:
+            record = self.core.get_record(memory_ref.id, memory_ref.revision)
+            if not isinstance(record, MemoryRecord):
+                continue
+            fragment_record = self.core.get_record(
+                record.assertion_fragment_ref.id, record.assertion_fragment_ref.revision
+            )
+            if not isinstance(fragment_record, ContentFragment):
+                continue
+            size = self._payload_size(fragment_record.payload_ref)
+            if total + size > MAX_CONTEXT_BYTES:
+                continue  # omit excess whole fragments, keep metadata
+            total += size
+            selected.append(RecordRef(id=fragment_record.id, revision=fragment_record.revision))
+        return tuple(selected)
+
+    def _payload_size(self, payload_id: str) -> int:
+        row = self.core._conn.execute(
+            "SELECT length(data) AS n FROM core_payloads WHERE payload_id = ?",
+            (payload_id,),
+        ).fetchone()
+        return row["n"] if row is not None else 0
 
     def build_snapshot(
         self,
@@ -760,7 +795,14 @@ class ContextMemory:
     ) -> ContextSnapshot:
         """Assemble + persist a context snapshot with CONTEXT_ASSEMBLY
         coverage; the snapshot's restrictions derive from actual inputs."""
-        selected = self.eligible_episode_fragments(episode_ref) if episode_ref else ()
+        episode = self.eligible_episode_fragments(episode_ref) if episode_ref else ()
+        audience = self.core.get_record(audience_ref.id, audience_ref.revision)
+        memories = (
+            self._eligible_memory_fragments(audience.destination_id)
+            if isinstance(audience, AudienceSnapshot)
+            else ()
+        )
+        selected = tuple(dict.fromkeys((*episode, *memories)))
         coverage = ProducerCoverage(
             id=f"coverage:context:{call_id}",
             revision=1,

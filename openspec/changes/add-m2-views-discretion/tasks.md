@@ -13,7 +13,7 @@
 
 ## 3. Memory lifecycle
 
-- [ ] 3.1 Eligibility via core.memory_scope: scope-index rows written transactionally with record promotion; selection filters by stage/scope/status/expiry before payload reads; no global index. Verify: ordinary private memories stay eligible cross-context; ineligible payloads are never read.
+- [x] 3.1 Eligibility via core.memory_scope: scope-index rows written transactionally with record promotion; selection filters by stage/scope/status/expiry before payload reads; no global index. Verify: ordinary private memories stay eligible cross-context; ineligible payloads are never read.
 - [ ] 3.2 Staged promotion and corrections: explicit promotion without scope widening; correction supersedes, invalidates snapshots/derivations via the dependency graph, blocks stale promotions on version-vector mismatch. Verify: stale-summary-after-correction and promotion-without-widening scenarios pass.
 - [ ] 3.3 INTERNAL_ONLY containment: strong internal-only views structurally inadmissible to externally effect-capable snapshots (including DMs). Verify: admission failure at snapshot build, never at dispatch.
 

@@ -23,6 +23,8 @@ from agora.contracts import (
     REASON_CODES,
     RECORD_TYPES,
     DependencyKind,
+    MemoryRecord,
+    MemoryStage,
     PayloadStatus,
     ReasonCode,
     Record,
@@ -501,6 +503,73 @@ class CoreStore(_Domain):
             for record in batch:
                 self._put_record_tx(connection, record, text_field_refs=swaps.get(record.id))
             self._verify_ref_targets_tx(connection, batch)
+
+    def promote_memory(self, memory: MemoryRecord, *, expiry_ms: int | None) -> None:
+        """Persist one memory assertion revision and its scope-index row in
+        ONE transaction (§7 core.memory_scope: eligibility is filtered on
+        the index before any candidate payload is read). ``expiry_ms`` is
+        virtual milliseconds; the caller (who owns the clock) converts the
+        record's ``valid_until``."""
+        with _tx(self._conn) as connection:
+            self._put_record_tx(connection, memory)
+            self._verify_ref_targets_tx(connection, (memory,))
+            connection.execute(
+                "INSERT INTO core_memory_scope (memory_id, revision, stage, scope_kind,"
+                " scope_ref, status, expiry_ms, assertion_ref, commitment_refs)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT (memory_id, revision) DO NOTHING",
+                (
+                    memory.id,
+                    memory.revision,
+                    memory.stage.value,
+                    memory.scope_kind.value,
+                    memory.scope_ref,
+                    memory.status.value,
+                    expiry_ms,
+                    memory.assertion_fragment_ref.id,
+                    json.dumps([f"{ref.id}:{ref.revision}" for ref in memory.commitment_refs]),
+                ),
+            )
+
+    def memory_scope_rows(self, memory_id: str) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT * FROM core_memory_scope WHERE memory_id = ? ORDER BY revision",
+            (memory_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def eligible_memory_refs(
+        self,
+        *,
+        scope_kind: str,
+        scope_ref: str,
+        now_ms: int,
+        stages: frozenset[MemoryStage] = frozenset(MemoryStage),
+    ) -> tuple[RecordRef, ...]:
+        """Index-only eligibility (§7): stage/scope/status/expiry filtering
+        happens on core_memory_scope before any candidate payload is read.
+        AGENT-scoped memories are the agent's own and stay eligible in every
+        context (cross-room recall); other scopes match only their own ref —
+        episode membership or room merges confer no scope rights. Rows for
+        superseded revisions are ignored (the current revision wins)."""
+        if not stages:
+            return ()
+        placeholders = ",".join("?" for _ in stages)
+        rows = self._conn.execute(
+            "SELECT memory_id, revision FROM core_memory_scope"
+            " WHERE status = 'ACTIVE'"
+            " AND (scope_kind = 'AGENT' OR (scope_kind = ? AND scope_ref = ?))"
+            " AND (expiry_ms IS NULL OR expiry_ms > ?)"
+            f" AND stage IN ({placeholders})"
+            " ORDER BY memory_id",
+            (scope_kind, scope_ref, now_ms, *(stage.value for stage in stages)),
+        ).fetchall()
+        eligible: list[RecordRef] = []
+        for row in rows:
+            current = self.current_ref(row["memory_id"])
+            if current is not None and current.revision == row["revision"]:
+                eligible.append(current)
+        return tuple(eligible)
 
     def verify_reference(
         self, ref: RecordRef, allowed: str | frozenset[str], *, label: str
