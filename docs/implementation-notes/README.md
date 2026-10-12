@@ -12,5 +12,6 @@ Conventions:
 
 ## Notes
 
+- [2026-10-12 — Release-ledger review visibility decision](2026-10-12-release-ledger-review-visibility.md): ReviewEnvelope stays the closed handoff field set for M2; reviewer-facing ledger is a documented future schema bump.
 - [2026-10-11 — Package structure convention](2026-10-11-package-structure.md): how agora/ grows — §2 boundary names stay, modules promote to re-exporting packages on a size/concern trigger.
 - [2026-10-09 — M0 foundation](2026-10-09-m0-foundation.md): implementation location, Python version pin, Beads/OpenSpec workflow split.

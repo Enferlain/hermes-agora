@@ -2,7 +2,7 @@
 
 Proposed development sequence · 8 October 2026
 
-> **Status:** Active roadmap
+> **Status:** Active roadmap — M0 and M1 complete (per Beads); M2 is the active milestone
 >
 > Milestone completion is tracked in Beads. This file describes intended sequencing and exit criteria.
 
@@ -152,4 +152,4 @@ The coding session must not guess real confidentiality norms, unknown joint-auth
 
 Acceptance reports should separate code invariants, model-backed observations and live platform limitations. Later scope changes require a current implementation note or architecture revision, with Beads dependencies and applicable OpenSpec requirements updated. Historical v0.1/v0.2 files remain reference evidence.
 
-The next concrete deliverable is M0 plus a small M1 whole-turn replay, followed by the protected-view and recovery work needed to complete M3. That keeps progress visible while building toward the actual objective: a continuous agent that can know things, exercise discretion and still choose to participate naturally.
+M0 and M1 are complete. The next concrete deliverable is M2 (views and discretion: authority evaluation, scoped memory, the two fixed transforms, and NONE/ADVISORY/REQUIRED/HARD_DENY routing), followed by the M3 dispatch and recovery work needed to finish the synthetic slice. The objective is unchanged: a continuous agent that can know things, exercise discretion and still choose to participate naturally.

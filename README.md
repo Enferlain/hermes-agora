@@ -195,11 +195,11 @@ Transport is a lifecycle and delivery boundary, not a second mind.
 
 ## Current status
 
-Agora is currently in the architecture/prototype stage.
+M0 (project foundation) and M1 (one deterministic end-to-end turn) are implemented and tested; milestone completion state lives in Beads.
 
-The first implementation target is a deterministic replay environment using synthetic resources and a fake transport.
+The implemented replay slice covers: the full typed contract layer, two SQLite ownership domains with crash-safe ingestion and epoch fencing, the virtual clock and fault checkpoints, and the whole-turn path (coordinator, context assembly with producer coverage, CommitGate, fake sidecar/world) demonstrating message, reaction, explicit silence and timer-driven initiation via `agora replay`.
 
-It is intended to validate:
+M2 (contextual discretion and protected views) is the active milestone. A deterministic replay environment with synthetic resources and a fake transport remains the test bed until M3; it is intended to validate:
 
 - provenance propagation
 - autonomous intent creation
@@ -222,14 +222,21 @@ The first vertical slice is intentionally small:
 
 ```text
 agora/
-├── contracts.py
+├── contracts/
+│   ├── enums.py
+│   ├── values.py
+│   ├── canonical.py
+│   ├── records.py
+│   ├── codec.py
+│   └── model_steps.py
 ├── stores.py
 ├── context_memory.py
 ├── coordinator.py
 ├── commit_gate.py
 ├── fake_sidecar.py
 ├── ports.py
-└── runner.py
+├── runner.py
+└── cli.py
 ```
 
 These boundaries are provisional.

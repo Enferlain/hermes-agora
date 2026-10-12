@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), with the change of using daily dated entries instead of releases.
 
+## 2026-10-12
+
+### Changed
+
+- Updated README and ROADMAP to the implemented state: M0/M1 complete, the replay slice and its module layout described as-is, M2 named the active milestone.
+- Archived the completed `add-m1-replay-turn` OpenSpec change and synced its three capability specs into the main specs (`openspec/specs/replay/{record-contracts,storage,whole-turn}`).
+
+### Added
+
+- Recorded the release-ledger review-visibility decision (implementation note): the M2 ReviewEnvelope remains the handoff's closed field set; reviewer-facing ledger visibility is a documented schema-bump extension, not a silent drop.
+
+### Fixed
+
+- Replaced the coordinator's reach into `CoreStore._conn` with a public `ready_work_ids()` store method and restored concrete `ContextSnapshot` typing in the plan-submission path (beads msp/bbx).
+
 ## 2026-10-11
 
 ### Added

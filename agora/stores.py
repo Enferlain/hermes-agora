@@ -705,6 +705,13 @@ class CoreStore(_Domain):
         )
         return True
 
+    def ready_work_ids(self) -> tuple[str, ...]:
+        """READY work ids in trigger-key order (deterministic scheduling)."""
+        rows = self._conn.execute(
+            "SELECT work_id FROM core_work WHERE state = 'READY' ORDER BY trigger_key"
+        ).fetchall()
+        return tuple(row["work_id"] for row in rows)
+
     def get_work(self, work_id: str) -> dict[str, Any] | None:
         row = self._conn.execute("SELECT * FROM core_work WHERE work_id = ?", (work_id,)).fetchone()
         return None if row is None else dict(row)

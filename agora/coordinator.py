@@ -24,6 +24,7 @@ from agora.contracts import (
     Completeness,
     ComputeSink,
     ContentFragment,
+    ContextSnapshot,
     DecisionKind,
     Effect,
     EffectKind,
@@ -220,10 +221,7 @@ class Coordinator:
         return receipt
 
     def ready_work_ids(self) -> tuple[str, ...]:
-        rows = self.core._conn.execute(
-            "SELECT work_id FROM core_work WHERE state = 'READY' ORDER BY trigger_key"
-        ).fetchall()
-        return tuple(row["work_id"] for row in rows)
+        return self.core.ready_work_ids()
 
     def run_turn(self, work_id: str, *, intent_ref: RecordRef | None = None) -> TurnResult:
         """Run one work item to a typed outcome. Steps are accepted with
@@ -365,7 +363,7 @@ class Coordinator:
         self,
         work_id: str,
         step: ModelSubmitPlanStep,
-        snapshot: Any,
+        snapshot: ContextSnapshot,
         intent_ref: RecordRef,
         *,
         proposal_revision: int,
@@ -633,5 +631,5 @@ def _json_dumps(value: Any) -> str:
     return canonical_json_bytes(value).decode("utf-8")
 
 
-def _context_summary(snapshot: Any) -> str:
+def _context_summary(snapshot: ContextSnapshot) -> str:
     return f"snapshot:{snapshot.id}:fragments:{len(snapshot.selected_fragment_refs)}"
