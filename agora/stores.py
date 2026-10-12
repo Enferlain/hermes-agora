@@ -19,16 +19,19 @@ from pathlib import Path
 from typing import Any
 
 from agora.contracts import (
+    ANY_TARGET,
     REASON_CODES,
     RECORD_TYPES,
     DependencyKind,
     PayloadStatus,
+    ReasonCode,
     Record,
     RecordRef,
     RecoveryStatus,
     ValidationError,
     WorkState,
     canonical_json_bytes,
+    iter_ref_checks,
     record_from_payload,
     record_to_payload,
     strict_json_loads,
@@ -217,6 +220,20 @@ class RecordConflictError(StoreError):
 
 class TransitionError(StoreError):
     """A state transition or fencing check failed (STALE_EPOCH and friends)."""
+
+
+class InvalidReferenceError(StoreError):
+    """A RecordRef target is missing or has the wrong record type (handoff
+    §7 core.records typed refs). Raised inside the insert transaction, so
+    nothing is written."""
+
+    reason_code = ReasonCode.INVALID_REFERENCE
+
+    def __init__(self, field: str, ref: RecordRef, detail: str) -> None:
+        super().__init__(f"{field} cites {ref.id} revision {ref.revision} {detail}")
+        self.field = field
+        self.ref = ref
+        self.detail = detail
 
 
 class DependencyCycleError(StoreError):
@@ -454,65 +471,150 @@ class CoreStore(_Domain):
         payload-ref field (design D5): the text is swapped into the
         out-of-line payload store and the stored record JSON carries only
         the ref, never the bytes.
+
+        Typed refs (handoff §7): every RecordRef field is verified against
+        the REF_TARGETS map inside the same transaction — a missing target
+        or a wrong target type raises InvalidReferenceError with nothing
+        written. Targets must already exist; use ``put_records`` when a
+        batch needs intra-batch forward references.
         """
+        with _tx(self._conn) as connection:
+            self._put_record_tx(connection, record, text_field_refs=text_field_refs)
+            self._verify_ref_targets_tx(connection, (record,))
+
+    def put_records(
+        self,
+        records: tuple[Record, ...] | list[Record],
+        *,
+        text_field_refs: dict[str, dict[str, str]] | None = None,
+    ) -> None:
+        """Insert several records in ONE transaction, verifying references
+        only after every insert: intra-batch forward and circular references
+        resolve (fixture loads; view/certificate pairs). Any failure —
+        conflict or invalid reference — rolls back the whole batch.
+        ``text_field_refs`` is keyed by record id, each value the same per-
+        record mapping ``put_record`` takes.
+        """
+        batch = tuple(records)
+        swaps = text_field_refs or {}
+        with _tx(self._conn) as connection:
+            for record in batch:
+                self._put_record_tx(connection, record, text_field_refs=swaps.get(record.id))
+            self._verify_ref_targets_tx(connection, batch)
+
+    def verify_reference(
+        self, ref: RecordRef, allowed: str | frozenset[str], *, label: str
+    ) -> None:
+        """Resolve one reference outside an insert (coordinator
+        pre-validation of model-supplied ids, handoff §5: "the coordinator
+        ... validates referenced IDs")."""
+        row = self._conn.execute(
+            "SELECT record_type FROM core_records WHERE record_id = ? AND revision = ?",
+            (ref.id, ref.revision),
+        ).fetchone()
+        if row is None:
+            raise InvalidReferenceError(label, ref, "does not exist")
+        expected = {allowed} if isinstance(allowed, str) else set(allowed)
+        if row["record_type"] not in expected:
+            raise InvalidReferenceError(
+                label, ref, f"is a {row['record_type']}, expected {sorted(expected)}"
+            )
+
+    def _put_record_tx(
+        self,
+        connection: sqlite3.Connection,
+        record: Record,
+        *,
+        text_field_refs: dict[str, str] | None = None,
+    ) -> None:
         payload = record_to_payload(record)
         owner = json.dumps({"id": record.id, "revision": record.revision}, sort_keys=True)
-        with _tx(self._conn) as connection:
-            for field_name, ref_field_name in (text_field_refs or {}).items():
-                text = payload.get(field_name)
-                if not isinstance(text, str) or not text:
-                    raise ValidationError(
-                        f"text field {field_name} must be a non-empty string",
-                        path=field_name,
-                    )
-                payload_id = (
-                    f"payload:{record.TYPE_NAME}:{record.id}:{record.revision}:{field_name}"
+        for field_name, ref_field_name in (text_field_refs or {}).items():
+            text = payload.get(field_name)
+            if not isinstance(text, str) or not text:
+                raise ValidationError(
+                    f"text field {field_name} must be a non-empty string",
+                    path=field_name,
                 )
-                connection.execute(
-                    "INSERT INTO core_payloads (payload_id, owner_ref, data, sensitivity_refs,"
-                    " commitment_refs, expires_at_ms, status) VALUES (?, ?, ?, ?, ?, NULL, ?)",
-                    (payload_id, owner, text, "[]", "[]", PayloadStatus.ACTIVE.value),
-                )
-                payload[field_name] = None
-                payload[ref_field_name] = payload_id
-            record_epoch = getattr(record, "runtime_epoch", None)
-            if record_epoch is not None and record_epoch != self.runtime_epoch:
-                raise TransitionError(
-                    f"record {record.id} carries epoch {record_epoch},"
-                    f" store is at {self.runtime_epoch}: STALE_EPOCH",
-                )
+            payload_id = f"payload:{record.TYPE_NAME}:{record.id}:{record.revision}:{field_name}"
             connection.execute(
-                "UPDATE core_records SET is_current = 0 WHERE record_id = ? AND is_current = 1"
-                " AND revision < ?",
-                (record.id, record.revision),
+                "INSERT INTO core_payloads (payload_id, owner_ref, data, sensitivity_refs,"
+                " commitment_refs, expires_at_ms, status) VALUES (?, ?, ?, ?, ?, NULL, ?)",
+                (payload_id, owner, text, "[]", "[]", PayloadStatus.ACTIVE.value),
             )
-            payload_text = canonical_json_bytes(payload).decode("utf-8")
-            try:
-                connection.execute(
-                    "INSERT INTO core_records (record_id, revision, record_type, payload_json,"
-                    " is_current, created_at) VALUES (?, ?, ?, ?, 1, ?)",
-                    (
-                        record.id,
-                        record.revision,
-                        record.TYPE_NAME,
-                        payload_text,
-                        record.created_at,
-                    ),
+            payload[field_name] = None
+            payload[ref_field_name] = payload_id
+        record_epoch = getattr(record, "runtime_epoch", None)
+        if record_epoch is not None and record_epoch != self.runtime_epoch:
+            raise TransitionError(
+                f"record {record.id} carries epoch {record_epoch},"
+                f" store is at {self.runtime_epoch}: STALE_EPOCH",
+            )
+        connection.execute(
+            "UPDATE core_records SET is_current = 0 WHERE record_id = ? AND is_current = 1"
+            " AND revision < ?",
+            (record.id, record.revision),
+        )
+        payload_text = canonical_json_bytes(payload).decode("utf-8")
+        try:
+            connection.execute(
+                "INSERT INTO core_records (record_id, revision, record_type, payload_json,"
+                " is_current, created_at) VALUES (?, ?, ?, ?, 1, ?)",
+                (
+                    record.id,
+                    record.revision,
+                    record.TYPE_NAME,
+                    payload_text,
+                    record.created_at,
+                ),
+            )
+        except sqlite3.IntegrityError:
+            # History is never edited — but a crash-replayed step
+            # regenerates byte-identical records, and re-accepting the
+            # same fact is idempotent (§7 replay dedup). Identical bytes
+            # pass silently; different bytes are a CONFLICT.
+            existing = connection.execute(
+                "SELECT payload_json FROM core_records WHERE record_id = ? AND revision = ?",
+                (record.id, record.revision),
+            ).fetchone()
+            if existing is None or existing["payload_json"] != payload_text:
+                raise RecordConflictError(
+                    f"record {record.id} revision {record.revision} already exists"
+                    " with different bytes"
+                ) from None
+
+    def _verify_ref_targets_tx(
+        self, connection: sqlite3.Connection, records: tuple[Record, ...]
+    ) -> None:
+        """Check every typed-ref field of ``records`` against rows visible
+        in this transaction (committed or inserted earlier in it)."""
+        checks = [
+            (f"{record.TYPE_NAME}.{field}", ref, allowed)
+            for record in records
+            for field, ref, allowed in iter_ref_checks(record)
+        ]
+        if not checks:
+            return
+        pairs = {(ref.id, ref.revision) for _, ref, _ in checks}
+        placeholders = ",".join("(?,?)" for _ in pairs)
+        flat = [value for pair in pairs for value in pair]
+        rows = connection.execute(
+            "SELECT record_id, revision, record_type FROM core_records"
+            f" WHERE (record_id, revision) IN (VALUES {placeholders})",
+            flat,
+        ).fetchall()
+        resolved = {(row["record_id"], row["revision"]): row["record_type"] for row in rows}
+        for label, ref, allowed in checks:
+            found = resolved.get((ref.id, ref.revision))
+            if found is None:
+                raise InvalidReferenceError(label, ref, "does not exist")
+            if allowed == ANY_TARGET:
+                continue
+            expected = {allowed} if isinstance(allowed, str) else set(allowed)
+            if found not in expected:
+                raise InvalidReferenceError(
+                    label, ref, f"is a {found}, expected {sorted(expected)}"
                 )
-            except sqlite3.IntegrityError:
-                # History is never edited — but a crash-replayed step
-                # regenerates byte-identical records, and re-accepting the
-                # same fact is idempotent (§7 replay dedup). Identical bytes
-                # pass silently; different bytes are a CONFLICT.
-                existing = connection.execute(
-                    "SELECT payload_json FROM core_records WHERE record_id = ? AND revision = ?",
-                    (record.id, record.revision),
-                ).fetchone()
-                if existing is None or existing["payload_json"] != payload_text:
-                    raise RecordConflictError(
-                        f"record {record.id} revision {record.revision} already exists"
-                        " with different bytes"
-                    ) from None
 
     def get_record(self, record_id: str, revision: int | None = None) -> Record | None:
         if revision is None:

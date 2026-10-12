@@ -133,6 +133,13 @@ from agora.contracts.records import (
     UseAuthorization,
     WorkItem,
 )
+from agora.contracts.ref_targets import (
+    ANY_TARGET,
+    PROVENANCE_REF_TARGETS,
+    REF_TARGETS,
+    RUNTIME_ORIGIN_REF_TARGETS,
+    iter_ref_checks,
+)
 from agora.contracts.values import (
     ID_PATTERN,
     MAX_ID_LEN,
@@ -166,16 +173,20 @@ from agora.contracts.values import (
 
 __all__ = [
     "ALL_RECORD_TYPES",
+    "ANY_TARGET",
     "ID_PATTERN",
     "MAX_ID_LEN",
     "MAX_LIST_LEN",
     "MAX_PAYLOAD_BYTES",
     "MAX_TEXT_CHARS",
     "MODEL_FORBIDDEN_KEYS",
+    "PROVENANCE_REF_TARGETS",
     "REASON_CODES",
     "RECORD_SCHEMA_VERSION",
     "RECORD_TYPES",
+    "REF_TARGETS",
     "RFC3339_UTC_PATTERN",
+    "RUNTIME_ORIGIN_REF_TARGETS",
     "SHA256_PATTERN",
     "AccessStatus",
     "AgentIdentity",
@@ -296,6 +307,7 @@ __all__ = [
     "check_version_vector",
     "enum_tuple",
     "id_tuple",
+    "iter_ref_checks",
     "pair_tuple",
     "parse_model_step",
     "record_from_payload",

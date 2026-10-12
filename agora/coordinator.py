@@ -15,6 +15,7 @@ from typing import Any
 from agora.commit_gate import CommitGate, GateContext
 from agora.context_memory import ContextMemory
 from agora.contracts import (
+    REF_TARGETS,
     AgentIdentity,
     AssertionStatus,
     AudienceSnapshot,
@@ -55,6 +56,7 @@ from agora.contracts import (
     SourceKind,
     TurnOutcome,
     Visibility,
+    WorkItem,
     WorkState,
     canonical_digest,
     canonical_json_bytes,
@@ -63,7 +65,13 @@ from agora.contracts import (
 )
 from agora.fake_sidecar import FakeSidecar
 from agora.ports import CrashCheckpoint, FaultInjector, MainModelPort, VirtualClock
-from agora.stores import CoreStore, IngestReceipt, TransportStore, ingest_batch
+from agora.stores import (
+    CoreStore,
+    IngestReceipt,
+    InvalidReferenceError,
+    TransportStore,
+    ingest_batch,
+)
 
 MAX_MAIN_STEPS = 8
 MAX_PLAN_SUBMISSIONS = 3
@@ -241,6 +249,7 @@ class Coordinator:
             )
 
         chosen_intent = intent_ref or self._work_intent(work_id, work)
+        self._ensure_work_item(work_id, work, chosen_intent)
         decision: CommitDecision | None = None
         receipt_ref: RecordRef | None = None
         outcome_kind: OutcomeKind | None = None
@@ -330,6 +339,22 @@ class Coordinator:
         except BudgetExhausted:
             outcome_kind = OutcomeKind.FAILED_INTERNAL
             reason_codes.append(ReasonCode.BUDGET_EXHAUSTED)
+        except PlanRejected as rejected:
+            # A model-supplied reference or hard limit failed before plan
+            # construction: a typed denial, never a crash (§5 coordinator
+            # validates referenced ids).
+            decision = CommitDecision(
+                id=f"decision:reject:{work_id}",
+                revision=1,
+                created_at=self.clock.now_rfc3339(),
+                kind=DecisionKind.DENIED,
+                reason_codes=(rejected.code,),
+                authorization_ref=None,
+                assessment_ref=None,
+            )
+            self.core.put_record(decision)
+            outcome_kind = OutcomeKind.HELD
+            reason_codes.append(rejected.code)
 
         outcome = TurnOutcome(
             id=f"outcome:{work_id}",
@@ -359,6 +384,35 @@ class Coordinator:
 
     # -- plan handling --------------------------------------------------------
 
+    def _ensure_work_item(self, work_id: str, work: dict[str, Any], intent_ref: RecordRef) -> None:
+        """Persist the §4.2 WorkItem record once per work item, at turn start
+        under the resolved intent. Written lazily (mechanical work resolves
+        its intent only here) and never rewritten — crash replay skips it,
+        so the epoch-bearing bytes can never conflict with themselves."""
+        if self.core.get_record(work_id) is not None:
+            return
+        episode_ref = None
+        if work["episode_ref"] is not None:
+            episode_ref = self.core.current_ref(work["episode_ref"])
+            if episode_ref is None:
+                raise ValueError(f"work {work_id} cites missing episode {work['episode_ref']}")
+        item = WorkItem(
+            id=work_id,
+            revision=1,
+            created_at=self.clock.now_rfc3339(),
+            intent_ref=intent_ref,
+            trigger_key=work["trigger_key"],
+            episode_ref=episode_ref,
+            state=WorkState.RUNNING,
+            lease_owner="agora:coordinator",
+            lease_until_ms=self.clock.now_ms() + 2000,
+            runtime_epoch=self.core.runtime_epoch,
+            main_steps_used=0,
+            submissions_used=0,
+            terminal_outcome_ref=None,
+        )
+        self.core.put_record(item)
+
     def _submit_plan(
         self,
         work_id: str,
@@ -370,6 +424,7 @@ class Coordinator:
     ) -> tuple[CommitDecision, RecordRef | None, list[RecordRef]]:
         work = self.core.get_work(work_id)
         assert work is not None
+        self._validate_model_refs(step)
         effects: list[Effect] = []
         for index, draft in enumerate(step.effects):
             rendered = self._render(draft)
@@ -435,7 +490,7 @@ class Coordinator:
             ),
         )
         receipt_ref: RecordRef | None = None
-        refs: list[RecordRef] = [RecordRef(id=plan.id, revision=plan.revision)]
+        refs = [RecordRef(id=effect.id, revision=effect.revision) for effect in effects]
         if decision.kind == DecisionKind.AUTHORIZED and effects:
             assert decision.authorization_ref is not None
             authorization = self.core.get_record(
@@ -446,9 +501,28 @@ class Coordinator:
                 authorization, effects[0], rendered_payload=self._render(step.effects[0])
             )
             receipt_ref = RecordRef(id=receipt.id, revision=receipt.revision)
-            refs.append(receipt_ref)
-            refs.extend(RecordRef(id=effect.id, revision=effect.revision) for effect in effects)
         return decision, receipt_ref, refs
+
+    def _validate_model_refs(self, step: ModelSubmitPlanStep) -> None:
+        """Model-supplied references are verified before anything is written
+        (handoff §5: the coordinator validates referenced IDs); a bad ref is
+        a typed plan rejection, and the store's insert-time check remains
+        the backstop for runtime-written records."""
+        effect_targets = REF_TARGETS[Effect]["target_ref"]
+        fact_targets = REF_TARGETS[EffectPlan]["declared_fact_refs"]
+        checks: list[tuple[RecordRef, str | frozenset[str]]] = [
+            *(
+                (draft.target_ref, effect_targets)
+                for draft in step.effects
+                if draft.target_ref is not None
+            ),
+            *((ref, fact_targets) for ref in step.declared_fact_refs),
+        ]
+        for ref, allowed in checks:
+            try:
+                self.core.verify_reference(ref, allowed, label="model step")
+            except InvalidReferenceError as error:
+                raise PlanRejected(ReasonCode.INVALID_REFERENCE, str(error)) from error
 
     def _render(self, draft: Any) -> dict[str, Any]:
         if draft.kind == EffectKind.SEND_MESSAGE:

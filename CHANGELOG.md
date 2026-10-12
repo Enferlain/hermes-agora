@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## 2026-10-12
 
+### Added
+
+- Store-level typed-reference verification (handoff §7 core.records "typed refs", M2 task 1.1 / beads hermes-agora-4za): a hand-authored `REF_TARGETS` map assigns every RecordRef-bearing field its expected target record type(s), verified inside the insert transaction — a missing target, wrong target type, or unresolvable cited revision fails `INVALID_REFERENCE` with nothing written. A codec-derived drift test keeps the map aligned with the actual record fields, and refs nested in Provenance/RuntimeOrigin values are verified too.
+- `CoreStore.put_records` batch insert: one transaction with reference verification after every insert, so fixture loads and view/certificate pairs can carry intra-batch forward and circular references (any failure rolls back the whole batch); `CoreStore.verify_reference` for coordinator-side pre-validation of model-supplied ids.
+- The coordinator now persists the §4.2 `WorkItem` record once per turn (lazily under the resolved intent, never rewritten across crash replay), pre-validates model-supplied effect targets and declared facts before writing anything (a bad reference is a typed HELD denial with `INVALID_REFERENCE`, not a crash), and `TurnOutcome.effect_refs` cites Effect records only.
+
 ### Changed
 
 - Updated README and ROADMAP to the implemented state: M0/M1 complete, the replay slice and its module layout described as-is, M2 named the active milestone.

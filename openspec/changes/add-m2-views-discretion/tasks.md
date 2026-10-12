@@ -2,7 +2,7 @@
 
 ## 1. Entry hardening
 
-- [ ] 1.1 Typed-ref target verification at `put_record` (beads hermes-agora-4za): REF_TARGETS map, in-transaction INVALID_REFERENCE failures, codec-derived drift test, fixture-loader batch validation for forward refs. Verify: wrong-type and missing-target inserts fail with nothing written; all existing tests stay green.
+- [x] 1.1 Typed-ref target verification at `put_record` (beads hermes-agora-4za): REF_TARGETS map, in-transaction INVALID_REFERENCE failures, codec-derived drift test, fixture-loader batch validation for forward refs. Verify: wrong-type and missing-target inserts fail with nothing written; all existing tests stay green.
 - [ ] 1.2 Manifest registries: principals/policies/bindings/authorizations/commitments/transform parameters seeding the five handoff resource classes through the fixture port; unknown ids fail startup. Verify: a seeded replay boots and the registries round-trip from core.records.
 
 ## 2. Authority and views

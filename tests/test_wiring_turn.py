@@ -205,7 +205,7 @@ def test_unsupported_destination_is_denied_and_inert(tmp_path: Path) -> None:
                 kind=EffectKind.ADD_REACTION,
                 destination_id="room:secret",
                 text=None,
-                target_ref=RecordRef(id="msg:1", revision=1),
+                target_ref=RecordRef(id="fragment:evt:1", revision=1),
                 emoji="👋",
             ),
         ),
@@ -236,6 +236,39 @@ def test_budget_exhaustion_ends_quietly(tmp_path: Path) -> None:
     assert result.outcome.kind == OutcomeKind.FAILED_INTERNAL
     assert "BUDGET_EXHAUSTED" in [code.value for code in result.outcome.reason_codes]
     assert stack.transport._conn.execute("SELECT count(*) FROM transport_outbox").fetchone()[0] == 0
+
+
+def test_model_supplied_bad_reference_is_a_typed_denial(tmp_path: Path) -> None:
+    """The coordinator validates referenced ids (§5): a reaction citing a
+    missing target is HELD with INVALID_REFERENCE and writes nothing."""
+    from agora.contracts import ModelEffectDraft
+
+    step = ModelSubmitPlanStep(
+        kind=MainStepKind.SUBMIT_PLAN,
+        intent_ref=RecordRef(id="intent:turn:work:turn:evt:1", revision=1),
+        disposition=Disposition.ACT,
+        effects=(
+            ModelEffectDraft(
+                kind=EffectKind.ADD_REACTION,
+                destination_id="room:public",
+                text=None,
+                target_ref=RecordRef(id="fragment:evt:404", revision=1),
+                emoji="👋",
+            ),
+        ),
+        declared_fact_refs=(),
+    )
+    stack = Stack(tmp_path, [step])
+    feed_event(stack)
+    work_id = stack.coordinator.ready_work_ids()[0]
+    result = stack.coordinator.run_turn(work_id)
+    assert result.outcome.kind == OutcomeKind.HELD
+    assert "INVALID_REFERENCE" in [code.value for code in result.outcome.reason_codes]
+    # nothing written past the denial: no effect, plan, outbox, or world rows
+    assert stack.core.get_record(f"{work_id}:effect:0") is None
+    assert stack.core.get_record(f"plan:{work_id}:1") is None
+    assert stack.transport._conn.execute("SELECT count(*) FROM transport_outbox").fetchone()[0] == 0
+    assert stack.world._conn.execute("SELECT count(*) FROM world_effects").fetchone()[0] == 0
 
 
 def test_crash_between_model_and_accept_recovers_deterministically(tmp_path: Path) -> None:
