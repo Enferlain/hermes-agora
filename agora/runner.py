@@ -486,6 +486,16 @@ def seed_registries(core: CoreStore, clock: VirtualClock, registries: Registries
             raise ManifestError(f"{label} cites unknown registry id {record_id!r}")
         return record_id
 
+    def resolve_transform(transform_id: str, label: str) -> None:
+        transform_spec(transform_id)  # unknown registry transform ids fail
+        if transform_id not in seeded_transform_ids:
+            raise ManifestError(
+                f"{label} allows {transform_id!r} but the manifest seeds no"
+                " fixture parameters for it"
+            )
+
+    seeded_transform_ids = {seed.id for seed in registries.transforms}
+
     for seed in registries.resources:
         resolve(seed.producer, f"resource {seed.id} producer")
         for commitment_id in seed.commitments:
@@ -506,7 +516,7 @@ def seed_registries(core: CoreStore, clock: VirtualClock, registries: Registries
             if cited:
                 resolve(cited, f"policy {seed.id} reference")
         for transform_id in seed.allowed_transforms:
-            transform_spec(transform_id)  # unknown registry transform ids fail
+            resolve_transform(transform_id, f"policy {seed.id}")
     for seed in registries.bindings:
         resolve(seed.issuer, f"binding {seed.id} issuer")
         resolve(seed.evidence, f"binding {seed.id} evidence")
@@ -520,7 +530,7 @@ def seed_registries(core: CoreStore, clock: VirtualClock, registries: Registries
             resolve(binding_id, f"authorization {seed.id} bindings")
         resolve(seed.resource_id, f"authorization {seed.id} resource_id")
         for transform_id in seed.transforms:
-            transform_spec(transform_id)  # unknown registry transform ids fail
+            resolve_transform(transform_id, f"authorization {seed.id}")
 
     principals = [
         Principal(

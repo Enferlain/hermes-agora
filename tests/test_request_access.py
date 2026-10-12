@@ -14,14 +14,17 @@ from agora.context_memory import ContextMemory
 from agora.contracts import (
     AccessStatus,
     Commitment,
+    ContentFragment,
     IntendedUse,
     MemoryAccessRequest,
     MemoryAccessResult,
     MemoryView,
+    Pair,
     ProducerCoverage,
     ReasonCode,
     RecordRef,
     RequestedPrecision,
+    TransformCertificate,
     ViewKind,
 )
 from agora.runner import ReplayRunner, RunManifest
@@ -55,6 +58,7 @@ def make_request(
     data_class: str | None = None,
     intended_use: IntendedUse = IntendedUse.INTERNAL_ONLY,
     precision: RequestedPrecision = RequestedPrecision.FIELDS,
+    transform_id: str | None = None,
     necessity: str = "needed to answer the budget question safely",
 ) -> MemoryAccessRequest:
     return MemoryAccessRequest(
@@ -67,7 +71,7 @@ def make_request(
         data_class=data_class,
         requested_precision=precision,
         requested_fields=(),
-        transform_id=None,
+        transform_id=transform_id,
         audience_ref=RecordRef(id="audience:room:public", revision=1),
         intended_use=intended_use,
         necessity_text=necessity,
@@ -200,3 +204,95 @@ def test_request_access_is_idempotent_under_replay(tmp_path: Path) -> None:
     again = core.get_record("result:probe:finance")
     assert isinstance(again, MemoryAccessResult)
     assert again.access_status == AccessStatus.GRANTED
+
+
+# ---------------------------------------------------------------------------
+# Task 2.3: the fixed transforms with certificates
+# ---------------------------------------------------------------------------
+
+
+def test_affordability_transform_exposes_predicate_only(tmp_path: Path) -> None:
+    core, context, _runner, intent_ref = boot(tmp_path)
+    result = context.request_access(
+        make_request(
+            request_id="probe:afford",
+            intent_ref=intent_ref,
+            resource_id=FINANCE_RESOURCE,
+            transform_id="FIXED_AFFORDABILITY_PREDICATE",
+        )
+    )
+    assert result.access_status == AccessStatus.GRANTED
+    assert result.view_kind == ViewKind.ABSTRACTED
+    assert result.transform_certificate_ref is not None
+    assert result.view_ref is not None
+
+    view = core.get_record(result.view_ref.id)
+    assert isinstance(view, MemoryView)
+    assert view.id == "view:probe:afford:transform"
+    assert view.precision == RequestedPrecision.ABSTRACT
+    assert [ref.id for ref in view.returned_fragment_refs] == ["fragment:transform:probe:afford"]
+    assert view.permitted_uses == (IntendedUse.INTERNAL_ONLY,)
+    assert [ref.id for ref in view.inherited_commitment_refs] == []  # discharged
+
+    # the output payload exposes the predicate result only — never the amount
+    fragment = core.get_record("fragment:transform:probe:afford")
+    assert isinstance(fragment, ContentFragment)
+    output = json.loads(core.get_payload(fragment.payload_ref) or "{}")
+    assert output == {"affordable": True}
+    assert "250" not in (core.get_payload(fragment.payload_ref) or "")
+
+    # the certificate names discharged vs retained and cites the source chain
+    certificate = core.get_record("certificate:probe:afford")
+    assert isinstance(certificate, TransformCertificate)
+    assert certificate.registry_transform_id == "FIXED_AFFORDABILITY_PREDICATE"
+    assert certificate.parameter_values == (Pair(first="price", second=30),)
+    assert [ref.id for ref in certificate.discharged_commitment_refs] == ["commit:finance-strong"]
+    assert certificate.retained_commitment_refs == ()
+    assert [ref.id for ref in certificate.authorizing_use_refs] == ["use:finance-fields"]
+    # the authorized source view persists as the auditable basis
+    assert core.get_record("view:probe:afford") is not None
+
+
+def test_field_view_transform_discharges_nothing(tmp_path: Path) -> None:
+    core, context, _runner, intent_ref = boot(tmp_path)
+    result = context.request_access(
+        make_request(
+            request_id="probe:fields",
+            intent_ref=intent_ref,
+            resource_id=FINANCE_RESOURCE,
+            transform_id="FIXED_FIELD_VIEW",
+        )
+    )
+    assert result.access_status == AccessStatus.GRANTED
+    assert result.view_kind == ViewKind.PARTIAL  # field values, not a predicate
+    assert result.view_ref is not None
+    view = core.get_record(result.view_ref.id)
+    assert isinstance(view, MemoryView)
+    assert view.precision == RequestedPrecision.FIELDS
+    # field values still carry the protected content: nothing is discharged
+    certificate = core.get_record("certificate:probe:fields")
+    assert isinstance(certificate, TransformCertificate)
+    assert certificate.discharged_commitment_refs == ()
+    assert [ref.id for ref in certificate.retained_commitment_refs] == ["commit:finance-strong"]
+    assert [ref.id for ref in view.inherited_commitment_refs] == ["commit:finance-strong"]
+    fragment = core.get_record("fragment:transform:probe:fields")
+    assert isinstance(fragment, ContentFragment)
+    output = json.loads(core.get_payload(fragment.payload_ref) or "{}")
+    assert output == {"fields": {"available": 250}}
+
+
+def test_unauthorized_transform_denied_before_certificate(tmp_path: Path) -> None:
+    core, context, _runner, intent_ref = boot(tmp_path)
+    # the third-party policy allows no transforms at all, and no
+    # authorization covers TRANSFORM for that resource anyway
+    result = context.request_access(
+        make_request(
+            request_id="probe:bad-transform",
+            intent_ref=intent_ref,
+            resource_id=THIRD_PARTY_RESOURCE,
+            transform_id="FIXED_AFFORDABILITY_PREDICATE",
+        )
+    )
+    assert result.access_status == AccessStatus.DENIED
+    assert core.get_record("certificate:probe:bad-transform") is None
+    assert core.get_record("fragment:transform:probe:bad-transform") is None

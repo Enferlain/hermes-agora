@@ -28,6 +28,7 @@ from typing import Any
 
 from agora.contracts import (
     AccessStatus,
+    AssertionStatus,
     AudienceSnapshot,
     AuthorityBinding,
     AuthorityDomain,
@@ -35,16 +36,22 @@ from agora.contracts import (
     ContentFragment,
     ContextSnapshot,
     DependencyKind,
+    EligibilityStatus,
     EnvelopePurpose,
     ExposureClass,
+    FragmentKind,
+    InstructionAuthority,
+    Integrity,
     IntendedUse,
     Intent,
     MemoryAccessRequest,
     MemoryAccessResult,
     MemoryView,
     ModelCallEnvelope,
+    Pair,
     ProducerCoverage,
     ProducerKind,
+    Provenance,
     ReasonCode,
     Record,
     RecordRef,
@@ -53,13 +60,16 @@ from agora.contracts import (
     ResourceOperation,
     ResourcePolicy,
     SnapshotStatus,
+    SourceKind,
+    TransformCertificate,
     UseAuthorization,
     ViewKind,
     canonical_json_bytes,
+    strict_json_loads,
 )
 from agora.ports import CrashCheckpoint, FaultInjector, VirtualClock
 from agora.stores import CoreStore
-from agora.transforms import TRANSFORM_REGISTRY
+from agora.transforms import TRANSFORM_REGISTRY, discharged_by, transform_spec
 
 MAX_SELECTED_EVENTS = 20
 MAX_CONTEXT_BYTES = 16 * 1024
@@ -72,6 +82,12 @@ _PRECISION_RANK: dict[RequestedPrecision, int] = {
     RequestedPrecision.ABSTRACT: 1,
     RequestedPrecision.FIELDS: 2,
     RequestedPrecision.EXACT: 3,
+}
+
+_VIEW_KIND_FOR_PRECISION: dict[RequestedPrecision, ViewKind] = {
+    RequestedPrecision.EXACT: ViewKind.FULL,
+    RequestedPrecision.FIELDS: ViewKind.PARTIAL,
+    RequestedPrecision.ABSTRACT: ViewKind.ABSTRACTED,
 }
 
 _USE_TO_OPERATIONS: dict[IntendedUse, tuple[ResourceOperation, ...]] = {
@@ -330,11 +346,7 @@ class AuthorityEvaluator:
                 _USE_PERMISSION_FROM_OPERATION[operation] for operation in authorization.operations
             )
         )
-        view_kind = {
-            RequestedPrecision.EXACT: ViewKind.FULL,
-            RequestedPrecision.FIELDS: ViewKind.PARTIAL,
-            RequestedPrecision.ABSTRACT: ViewKind.ABSTRACTED,
-        }[case.requested_precision]
+        view_kind = _VIEW_KIND_FOR_PRECISION[case.requested_precision]
         return _verdict(
             AccessStatus.GRANTED,
             view_kind=view_kind,
@@ -529,19 +541,30 @@ class ContextMemory:
                 valid_until=valid_until,
                 status=RecordStatus.ACTIVE,
             )
+        certificate: TransformCertificate | None = None
+        transform_records: tuple[Record, ...] = ()
+        source_view = view
+        if granted and view is not None and request.transform_id is not None:
+            view, certificate, transform_records = self._apply_transform(
+                request, view, verdict, now
+            )
         result = MemoryAccessResult(
             id=f"result:{request.request_id}",
             revision=1,
             created_at=now,
             request_id=request.request_id,
             access_status=verdict.status,
-            view_kind=verdict.view_kind,
+            view_kind=(
+                _VIEW_KIND_FOR_PRECISION[view.precision] if view is not None else verdict.view_kind
+            ),
             view_ref=RecordRef(id=view.id, revision=view.revision) if view else None,
             reason_codes=verdict.reason_codes,
             safe_feedback_template_id=None,
             permitted_uses=verdict.permitted_uses,
             producer_coverage_ref=RecordRef(id=coverage.id, revision=coverage.revision),
-            transform_certificate_ref=None,
+            transform_certificate_ref=(
+                RecordRef(id=certificate.id, revision=certificate.revision) if certificate else None
+            ),
             authorization_refs=tuple(
                 RecordRef(id=auth.id, revision=auth.revision) for auth in verdict.authorizations
             )
@@ -553,7 +576,11 @@ class ContextMemory:
             if granted
             else (),
         )
-        batch: tuple[Record, ...] = (coverage, view, result) if view else (coverage, result)
+        batch: tuple[Record, ...] = (
+            *((coverage, source_view) if source_view else (coverage,)),
+            *transform_records,
+            result,
+        )
         self.core.put_records(batch)
         if not granted and verdict.reason_codes:
             self.core.audit(
@@ -564,6 +591,136 @@ class ContextMemory:
                 at_ms=self.clock.now_ms(),
             )
         return result
+
+    def _apply_transform(
+        self,
+        request: MemoryAccessRequest,
+        source_view: MemoryView,
+        verdict: AccessVerdict,
+        now: str,
+    ) -> tuple[MemoryView, TransformCertificate, tuple[Record, ...]]:
+        """Run one registry transform over the authorized source view (design
+        D3): compute the output out-of-line, write a TransformCertificate
+        naming discharged vs retained commitments (only the spec's discharge
+        rule names anything), and build the output view citing the
+        certificate. Output views are internal-use only in this slice — a
+        predicate may itself reveal finances, so no transform widens uses."""
+        spec = transform_spec(request.transform_id) if request.transform_id else None
+        if spec is None:
+            raise ValueError("transform application requires a transform id")
+        if len(source_view.returned_fragment_refs) != 1:
+            raise ValueError("a transform applies to exactly one source resource")
+        parameters = json.loads(self.core.get_meta("fixture_transforms") or "{}").get(
+            spec.transform_id
+        )
+        if parameters is None:
+            raise ValueError(f"no fixture parameters seeded for {spec.transform_id}")
+        source_fragment = self._fragment_or_none(source_view.returned_fragment_refs[0].id)
+        if source_fragment is None:
+            raise ValueError("source fragment missing")
+        payload_text = self.core.get_payload(source_fragment.payload_ref)
+        if payload_text is None:
+            raise ValueError("source payload unavailable")
+        payload = strict_json_loads(payload_text)
+        output = spec.run(payload, parameters)
+        output_payload_id = f"payload:transform:{request.request_id}"
+        self.core.put_payload(
+            output_payload_id,
+            canonical_json_bytes(output).decode("utf-8"),
+            owner_ref=f"view:{request.request_id}",
+        )
+
+        inherited = verdict.inherited_commitments
+        discharged = tuple(c for c in inherited if discharged_by(spec, c))
+        retained = tuple(c for c in inherited if not discharged_by(spec, c))
+        authorization_refs = tuple(
+            RecordRef(id=auth.id, revision=auth.revision) for auth in verdict.authorizations
+        )
+        binding_refs = tuple(
+            RecordRef(id=binding.id, revision=binding.revision) for binding in verdict.bindings
+        )
+        coverage = ProducerCoverage(
+            id=f"coverage:transform:{request.request_id}",
+            revision=1,
+            created_at=now,
+            producer_kind=ProducerKind.TRANSFORM,
+            input_fragment_refs=(
+                RecordRef(id=source_fragment.id, revision=source_fragment.revision),
+            ),
+            input_view_refs=(RecordRef(id=source_view.id, revision=source_view.revision),),
+            input_intent_refs=(request.intent_ref,),
+            input_policy_refs=source_view.authorization_refs,
+            sink_ref=None,
+            call_id=f"transform:{request.request_id}",
+            runtime_epoch=self.core.runtime_epoch,
+        )
+        output_fragment = ContentFragment(
+            id=f"fragment:transform:{request.request_id}",
+            revision=1,
+            created_at=now,
+            kind=FragmentKind.TEXT,
+            payload_ref=output_payload_id,
+            provenance=Provenance(
+                producer_ref=RecordRef(id="principal:agent", revision=1),
+                source_kind=SourceKind.TOOL_RESULT,
+                origin_event_ref=None,
+                claimed_speaker_ref=None,
+                instruction_authority=InstructionAuthority.AGENT_STATE,
+                integrity=Integrity.DERIVED,
+                custodian_refs=(),
+                subject_refs=(),
+                original_audience_ref=None,
+                assertion_status=AssertionStatus.INFERENCE,
+                producer_coverage_ref=RecordRef(id=coverage.id, revision=coverage.revision),
+                model_claimed_parent_refs=(
+                    RecordRef(id=source_fragment.id, revision=source_fragment.revision),
+                ),
+                occurred_at=now,
+                observed_at=now,
+            ),
+            commitment_refs=tuple(RecordRef(id=c.id, revision=c.revision) for c in retained),
+            eligibility_status=EligibilityStatus.ACTIVE,
+        )
+        certificate = TransformCertificate(
+            id=f"certificate:{request.request_id}",
+            revision=1,
+            created_at=now,
+            registry_transform_id=spec.transform_id,
+            parameter_values=tuple(
+                Pair(first=name, second=value) for name, value in parameters.items()
+            ),
+            source_coverage_ref=source_view.producer_coverage_ref,
+            authorizing_binding_refs=binding_refs,
+            authorizing_use_refs=authorization_refs,
+            discharged_commitment_refs=tuple(
+                RecordRef(id=c.id, revision=c.revision) for c in discharged
+            ),
+            retained_commitment_refs=tuple(
+                RecordRef(id=c.id, revision=c.revision) for c in retained
+            ),
+            output_view_ref=RecordRef(id=f"view:{request.request_id}:transform", revision=1),
+        )
+        output_view = MemoryView(
+            id=f"view:{request.request_id}:transform",
+            revision=1,
+            created_at=now,
+            resource_id=source_view.resource_id,
+            returned_fragment_refs=(
+                RecordRef(id=output_fragment.id, revision=output_fragment.revision),
+            ),
+            authorization_refs=authorization_refs,
+            transform_certificate_ref=RecordRef(id=certificate.id, revision=certificate.revision),
+            producer_coverage_ref=RecordRef(id=coverage.id, revision=coverage.revision),
+            precision=spec.output_precision,
+            inherited_commitment_refs=tuple(
+                RecordRef(id=c.id, revision=c.revision) for c in retained
+            ),
+            permitted_uses=(IntendedUse.INTERNAL_ONLY,),
+            audience_bounds=source_view.audience_bounds,
+            valid_until=source_view.valid_until,
+            status=RecordStatus.ACTIVE,
+        )
+        return output_view, certificate, (coverage, output_fragment, certificate, output_view)
 
     def eligible_episode_fragments(self, episode_ref: RecordRef) -> tuple[RecordRef, ...]:
         """Recent ingested fragments for an episode, newest last, within the

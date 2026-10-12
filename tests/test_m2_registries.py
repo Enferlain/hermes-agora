@@ -66,13 +66,19 @@ def test_seeded_replay_boots_and_roundtrips(tmp_path: Path) -> None:
     policy = core.get_record("policy:finance")
     assert isinstance(policy, ResourcePolicy)
     assert policy.approval_rule.value == "SINGLE_ISSUER"
-    assert policy.allowed_transform_ids == ("FIXED_AFFORDABILITY_PREDICATE",)
+    assert policy.allowed_transform_ids == (
+        "FIXED_AFFORDABILITY_PREDICATE",
+        "FIXED_FIELD_VIEW",
+    )
     joint_policy = core.get_record("policy:joint")
     assert isinstance(joint_policy, ResourcePolicy)
     assert joint_policy.approval_rule.value == "ALL_LISTED"
     # fixture-fixed transform parameters persist as config meta
     stored = json.loads(core.get_meta("fixture_transforms") or "{}")
-    assert stored == {"FIXED_AFFORDABILITY_PREDICATE": {"price": 30}}
+    assert stored == {
+        "FIXED_AFFORDABILITY_PREDICATE": {"price": 30},
+        "FIXED_FIELD_VIEW": {"fields": "available"},
+    }
     # resource text lives out-of-line and is retrievable
     assert core.get_payload(f"payload:{FINANCE_RESOURCE}") is not None
     # the replay itself completed (quiet finish on the boot event)

@@ -9,7 +9,7 @@
 
 - [x] 2.1 Pure AuthorityEvaluator with the fixed evaluation order (references → registry → issuer quorum → authorization dimensions → conflict → transform admission); five access statuses with registry reason codes. Verify: property/unit battery covers every status, SINGLE_ISSUER vs ALL_LISTED, domain-scoped operations, no operator priority.
 - [x] 2.2 `ContextMemory.request_access` + view construction: result/view records persisted, permitted uses and inherited commitments from actual authorizations, necessity text out-of-line, audit rows registry-only. Verify: granted-partial and denied-nothing scenarios from the spec pass.
-- [ ] 2.3 Transform registry: FIXED_FIELD_VIEW and FIXED_AFFORDABILITY_PREDICATE with fixture-fixed parameters; certificates discharging only named commitments. Verify: affordability predicate output exposes only the predicate; unregistered transform ids fail.
+- [x] 2.3 Transform registry: FIXED_FIELD_VIEW and FIXED_AFFORDABILITY_PREDICATE with fixture-fixed parameters; certificates discharging only named commitments. Verify: affordability predicate output exposes only the predicate; unregistered transform ids fail.
 
 ## 3. Memory lifecycle
 

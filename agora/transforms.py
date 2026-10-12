@@ -13,10 +13,26 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from agora.contracts import Pair, ValidationError
+from agora.contracts import Commitment, Pair, RequestedPrecision, ValidationError
 
 FIXED_FIELD_VIEW = "FIXED_FIELD_VIEW"
 FIXED_AFFORDABILITY_PREDICATE = "FIXED_AFFORDABILITY_PREDICATE"
+
+#: Discharge rules for transform certificates. A certificate discharges
+#: only what its rule explicitly names; every other inherited commitment
+#: survives into the output view.
+#:
+#: - NONE: the output still carries the protected content (field values);
+#:   nothing is discharged.
+#: - INTERNAL_FLOW_ONLY: the output provably carries no protected value
+#:   (a bare predicate) and the output view's permitted uses are internal
+#:   only, so commitments that restrict only outward flow — internal use
+#:   allowed, observable influence and expression forbidden — no longer
+#:   bear on the output. Commitments that also restrict internal use or
+#:   that permit expression are retained (an affordability predicate may
+#:   itself reveal finances; addendum).
+DISCHARGE_NONE = "NONE"
+DISCHARGE_INTERNAL_FLOW_ONLY = "INTERNAL_FLOW_ONLY"
 
 TransformFunction = Callable[[Mapping[str, Any], Mapping[str, Any]], dict[str, Any]]
 
@@ -26,6 +42,8 @@ class TransformSpec:
     transform_id: str
     description: str
     parameter_names: tuple[str, ...]
+    discharge_rule: str
+    output_precision: RequestedPrecision
     run: TransformFunction
 
 
@@ -54,6 +72,8 @@ TRANSFORM_REGISTRY: dict[str, TransformSpec] = {
         transform_id=FIXED_FIELD_VIEW,
         description="Project fixture-selected fields from an authorized view payload.",
         parameter_names=("fields",),
+        discharge_rule=DISCHARGE_NONE,
+        output_precision=RequestedPrecision.FIELDS,
         run=_field_view,
     ),
     FIXED_AFFORDABILITY_PREDICATE: TransformSpec(
@@ -61,9 +81,22 @@ TRANSFORM_REGISTRY: dict[str, TransformSpec] = {
         description="Boolean affordability of a fixture-fixed price against the protected"
         " 'available' amount; exposes the predicate result only.",
         parameter_names=("price",),
+        discharge_rule=DISCHARGE_INTERNAL_FLOW_ONLY,
+        output_precision=RequestedPrecision.ABSTRACT,
         run=_affordability_predicate,
     ),
 }
+
+
+def discharged_by(spec: TransformSpec, commitment: Commitment) -> bool:
+    """Apply the spec's discharge rule to one inherited commitment."""
+    if spec.discharge_rule == DISCHARGE_NONE:
+        return False
+    return (
+        commitment.internal_use_allowed
+        and not commitment.observable_influence_allowed
+        and not commitment.expression_allowed
+    )
 
 
 def transform_spec(transform_id: str) -> TransformSpec:

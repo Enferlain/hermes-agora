@@ -62,9 +62,10 @@ def five_class_registries() -> dict[str, Any]:
                 "assertion_status": "AGENT_ADOPTED_PREFERENCE",
                 "commitments": ["commit:agent-pref-ordinary"],
             },
-            {  # 3. human financial protected fact
+            {  # 3. human financial protected fact (payload is structured
+                # fixture data the fixed transforms can compute over)
                 "id": FINANCE_RESOURCE,
-                "text": "monthly budget leaves 250 available after commitments",
+                "text": '{"available": 250, "currency": "EUR", "note": "monthly budget"}',
                 "producer": HUMAN,
                 "source_kind": "SOCIAL_MESSAGE",
                 "assertion_status": "ATTRIBUTED_ASSERTION",
@@ -151,7 +152,10 @@ def five_class_registries() -> dict[str, Any]:
                 "approval_rule": "SINGLE_ISSUER",
                 "eligible_issuers": [HUMAN],
                 "commitments": ["commit:finance-strong"],
-                "allowed_transforms": ["FIXED_AFFORDABILITY_PREDICATE"],
+                "allowed_transforms": [
+                    "FIXED_AFFORDABILITY_PREDICATE",
+                    "FIXED_FIELD_VIEW",
+                ],
             },
             {
                 "id": "policy:third-party",
@@ -224,7 +228,7 @@ def five_class_registries() -> dict[str, Any]:
                 "purpose_classes": ["social-participation"],
                 "audience_bounds": ["room:public"],
                 "precision": "FIELDS",
-                "transforms": ["FIXED_AFFORDABILITY_PREDICATE"],
+                "transforms": ["FIXED_AFFORDABILITY_PREDICATE", "FIXED_FIELD_VIEW"],
             },
             {
                 "id": "use:joint-expression",
@@ -244,6 +248,7 @@ def five_class_registries() -> dict[str, Any]:
         ],
         "transforms": [
             {"id": "FIXED_AFFORDABILITY_PREDICATE", "parameters": [["price", 30]]},
+            {"id": "FIXED_FIELD_VIEW", "parameters": [["fields", "available"]]},
         ],
     }
 
