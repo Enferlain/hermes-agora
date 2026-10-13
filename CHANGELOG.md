@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Strong INTERNAL_ONLY containment at snapshot build (M2 task 3.3): `build_snapshot` admits active views through a structural check — a view whose permitted uses are all internal-only (commitment-backed or transform-constructed alike) can never enter an externally effect-capable snapshot, a DM included; the failure is `ViewAdmissionError` (VIEW_FORBIDDEN) at build, never deferred to dispatch and never reviewer-waivable. Missing, superseded, or revoked views fail admission with STALE_CONTEXT. Admitted views flow into the snapshot's `active_view_refs`, the coverage's `input_view_refs`, dependency edges, and — via restriction inheritance — the snapshot's `inherited_commitment_refs` for §8 routing.
+
 - Staged memory promotion and corrections (M2 task 3.2): `ContextMemory.stage_memory` promotes EPHEMERAL → SOCIAL/CANDIDATE → DURABLE explicitly, always forward and never widening scope, and is blocked with SUPERSEDED when the proposal cites a revision the memory has moved past; `correct_memory` writes a superseding assertion revision (same stage/scope) and invalidates dependents via the dependency graph — derivations flip STALE, their retained output memories flip STALE (ineligible through the scope index), and snapshots built on the superseded assertion flip INVALID. `CoreStore.children_of` exposes the indexed dependent walk.
 
 ## 2026-10-12

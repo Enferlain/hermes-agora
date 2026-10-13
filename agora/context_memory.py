@@ -96,6 +96,16 @@ class MemoryStateError(Exception):
         self.code = code
 
 
+class ViewAdmissionError(Exception):
+    """Structural view-admission failure at snapshot build (task 3.3): the
+    containment decision happens here — never at dispatch, and it is not a
+    reviewer-waivable exception."""
+
+    def __init__(self, code: ReasonCode, detail: str) -> None:
+        super().__init__(f"{code.value}: {detail}")
+        self.code = code
+
+
 def _vector_cites(vector: tuple[RecordRef, ...], record_id: str, revision: int) -> bool:
     return any(ref.id == record_id and ref.revision == revision for ref in vector)
 
@@ -972,9 +982,17 @@ class ContextMemory:
         sink_ref: RecordRef,
         effect_capable: bool,
         call_id: str,
+        active_view_refs: tuple[RecordRef, ...] = (),
     ) -> ContextSnapshot:
         """Assemble + persist a context snapshot with CONTEXT_ASSEMBLY
-        coverage; the snapshot's restrictions derive from actual inputs."""
+        coverage; the snapshot's restrictions derive from actual inputs.
+
+        Admitted views are checked structurally at build time (task 3.3): a
+        view whose permitted uses are internal-only — whether backed by a
+        STRONG commitment or constructed so by a transform — can never enter
+        an externally effect-capable snapshot, a DM included. The failure is
+        here, never deferred to dispatch, and it is not reviewer-waivable."""
+        admitted = self._admit_views(active_view_refs, effect_capable=effect_capable)
         episode = self.eligible_episode_fragments(episode_ref) if episode_ref else ()
         audience = self.core.get_record(audience_ref.id, audience_ref.revision)
         memories = (
@@ -983,13 +1001,17 @@ class ContextMemory:
             else ()
         )
         selected = tuple(dict.fromkeys((*episode, *memories)))
+        inherited = tuple(
+            dict.fromkeys(ref for view in admitted for ref in view.inherited_commitment_refs)
+        )
+        admitted_refs = tuple(RecordRef(id=view.id, revision=view.revision) for view in admitted)
         coverage = ProducerCoverage(
             id=f"coverage:context:{call_id}",
             revision=1,
             created_at=self.clock.now_rfc3339(),
             producer_kind=ProducerKind.CONTEXT_ASSEMBLY,
             input_fragment_refs=selected,
-            input_view_refs=(),
+            input_view_refs=admitted_refs,
             input_intent_refs=(intent_ref,),
             input_policy_refs=(),
             sink_ref=sink_ref,
@@ -1006,10 +1028,10 @@ class ContextMemory:
             audience_ref=audience_ref,
             episode_ref=episode_ref,
             selected_fragment_refs=selected,
-            active_view_refs=(),
+            active_view_refs=admitted_refs,
             producer_coverage_ref=RecordRef(id=coverage.id, revision=coverage.revision),
             exposure_class=ExposureClass.ORDINARY,
-            inherited_commitment_refs=(),
+            inherited_commitment_refs=inherited,
             version_vector=tuple(sorted(selected, key=lambda ref: ref.id)),
             sink_ref=sink_ref,
             effect_capable=effect_capable,
@@ -1017,13 +1039,48 @@ class ContextMemory:
             status=SnapshotStatus.ACTIVE,
         )
         self.core.put_record(snapshot)
-        for ref in selected:
+        for ref in (*selected, *admitted_refs):
             self.core.add_dependency(
                 RecordRef(id=snapshot.id, revision=snapshot.revision),
                 ref,
                 DependencyKind.PRODUCER_INPUT,
             )
         return snapshot
+
+    def _admit_views(
+        self, active_view_refs: tuple[RecordRef, ...], *, effect_capable: bool
+    ) -> tuple[MemoryView, ...]:
+        """Load and structurally admit the requested views. A missing view,
+        a non-current citation, or a non-ACTIVE status fails admission with
+        STALE_CONTEXT; an internal-only view fails against an externally
+        effect-capable snapshot with VIEW_FORBIDDEN (task 3.3)."""
+        admitted: list[MemoryView] = []
+        for view_ref in active_view_refs:
+            record = self.core.get_record(view_ref.id, view_ref.revision)
+            if not isinstance(record, MemoryView):
+                raise ViewAdmissionError(
+                    ReasonCode.STALE_CONTEXT, f"view {view_ref.id} does not resolve"
+                )
+            current = self.core.current_ref(view_ref.id)
+            if current is None or current.revision != view_ref.revision:
+                raise ViewAdmissionError(
+                    ReasonCode.STALE_CONTEXT,
+                    f"view {view_ref.id} cited at revision {view_ref.revision} is not current",
+                )
+            if record.status != RecordStatus.ACTIVE:
+                raise ViewAdmissionError(
+                    ReasonCode.STALE_CONTEXT, f"view {view_ref.id} is not active"
+                )
+            if effect_capable and all(
+                use == IntendedUse.INTERNAL_ONLY for use in record.permitted_uses
+            ):
+                raise ViewAdmissionError(
+                    ReasonCode.VIEW_FORBIDDEN,
+                    f"strongly internal-only view {view_ref.id} cannot enter an"
+                    " externally effect-capable snapshot (including a DM)",
+                )
+            admitted.append(record)
+        return tuple(admitted)
 
     def record_envelope(
         self,
