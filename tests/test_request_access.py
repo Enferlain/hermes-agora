@@ -296,3 +296,225 @@ def test_unauthorized_transform_denied_before_certificate(tmp_path: Path) -> Non
     assert result.access_status == AccessStatus.DENIED
     assert core.get_record("certificate:probe:bad-transform") is None
     assert core.get_record("fragment:transform:probe:bad-transform") is None
+
+
+# ---------------------------------------------------------------------------
+# Review(section 2) regressions: data-class merging, typed transform failures
+# ---------------------------------------------------------------------------
+
+
+def seed_extra_member(
+    core: CoreStore,
+    resource_id: str,
+    *,
+    text: str = '{"available": 80}',
+    data_class: str = "financial",
+    commitment_id: str | None = None,
+) -> None:
+    """A complete second registry member (fragment/policy/binding/auth/
+    commitment) written directly through the record API."""
+    from agora.contracts import (
+        ApprovalRule,
+        AuthorityBinding,
+        AuthorityDomain,
+        Commitment,
+        CommitmentStrength,
+        Principal,
+        PrincipalKind,
+        RecordStatus,
+        RequestedPrecision,
+        ResourceOperation,
+        ResourcePolicy,
+        UseAuthorization,
+    )
+
+    now = "2026-10-12T12:00:00Z"
+    principal_id = f"principal:issuer:{resource_id.split(':')[-1]}"
+    core.put_record(
+        Principal(
+            id=principal_id,
+            revision=1,
+            created_at=now,
+            kind=PrincipalKind.HUMAN_OPERATOR,
+            verified_bindings=(),
+            claimed_aliases=(),
+        )
+    )
+    core.put_payload(f"payload:{resource_id}", text, owner_ref=resource_id)
+    from agora.contracts import ContentFragment, EligibilityStatus, FragmentKind
+    from tests.test_memory_lifecycle import _plain_provenance_for
+
+    core.put_record(
+        ContentFragment(
+            id=resource_id,
+            revision=1,
+            created_at=now,
+            kind=FragmentKind.TEXT,
+            payload_ref=f"payload:{resource_id}",
+            provenance=_plain_provenance_for(principal_id),
+            commitment_refs=(),
+            eligibility_status=EligibilityStatus.ACTIVE,
+        )
+    )
+    commitment_ref = None
+    if commitment_id is not None:
+        commitment = Commitment(
+            id=commitment_id,
+            revision=1,
+            created_at=now,
+            subject_refs=(),
+            custodian_refs=(),
+            resource_id=resource_id,
+            source_scope=None,
+            strength=CommitmentStrength.STRONG,
+            internal_use_allowed=True,
+            observable_influence_allowed=False,
+            expression_allowed=False,
+            audience_predicate_id="pred:subject-only",
+            policy_evidence_refs=(),
+        )
+        core.put_record(commitment)
+        commitment_ref = RecordRef(id=commitment_id, revision=1)
+    core.put_records(
+        (
+            ResourcePolicy(
+                id=f"policy:{resource_id}",
+                revision=1,
+                created_at=now,
+                resource_id=resource_id,
+                data_class=data_class,
+                approval_rule=ApprovalRule.SINGLE_ISSUER,
+                eligible_issuer_refs=(RecordRef(id=principal_id, revision=1),),
+                commitment_refs=(commitment_ref,) if commitment_ref else (),
+                allowed_transform_ids=("FIXED_AFFORDABILITY_PREDICATE",),
+                policy_revision=1,
+                status=RecordStatus.ACTIVE,
+            ),
+            AuthorityBinding(
+                id=f"binding:{resource_id}",
+                revision=1,
+                created_at=now,
+                issuer_ref=RecordRef(id=principal_id, revision=1),
+                domain=AuthorityDomain.RESOURCE_USE,
+                resource_id=resource_id,
+                evidence_ref=RecordRef(id="fragment:evidence:bindings", revision=1),
+                delegated_from=None,
+                valid_until=None,
+                revoked_at=None,
+            ),
+            UseAuthorization(
+                id=f"use:{resource_id}",
+                revision=1,
+                created_at=now,
+                resource_id=resource_id,
+                issuer_refs=(RecordRef(id=principal_id, revision=1),),
+                binding_refs=(RecordRef(id=f"binding:{resource_id}", revision=1),),
+                operations=(ResourceOperation.READ, ResourceOperation.TRANSFORM),
+                permitted_purpose_classes=("social-participation",),
+                audience_class_bounds=("room:public",),
+                maximum_precision=RequestedPrecision.FIELDS,
+                allowed_transform_ids=("FIXED_AFFORDABILITY_PREDICATE",),
+                valid_until=None,
+                status=RecordStatus.ACTIVE,
+            ),
+        )
+    )
+
+
+def test_data_class_view_carries_every_members_restrictions(tmp_path: Path) -> None:
+    core, context, _runner, intent_ref = boot(tmp_path)
+    seed_extra_member(
+        core,
+        "fragment:res:finance-2",
+        commitment_id="commit:finance-2-strong",
+    )
+    result = context.request_access(
+        make_request(
+            request_id="probe:class2",
+            intent_ref=intent_ref,
+            resource_id=None,
+            data_class="financial",
+        )
+    )
+    assert result.access_status == AccessStatus.GRANTED
+    assert result.view_ref is not None
+    view = core.get_record(result.view_ref.id)
+    assert isinstance(view, MemoryView)
+    # both members' fragments ship; BOTH members' restrictions ship with them
+    assert {ref.id for ref in view.returned_fragment_refs} == {
+        FINANCE_RESOURCE,
+        "fragment:res:finance-2",
+    }
+    assert {ref.id for ref in view.inherited_commitment_refs} == {
+        "commit:finance-strong",
+        "commit:finance-2-strong",
+    }
+    assert {ref.id for ref in view.authorization_refs} == {
+        "use:finance-fields",
+        "use:fragment:res:finance-2",
+    }
+
+
+def test_data_class_duplicate_policy_conflicts(tmp_path: Path) -> None:
+    core, context, _runner, intent_ref = boot(tmp_path)
+    seed_extra_member(core, "fragment:res:finance-2")
+    # a second ACTIVE policy for the SAME resource -> contradictory rules
+    from agora.contracts import ApprovalRule, RecordStatus, ResourcePolicy
+
+    duplicate = ResourcePolicy(
+        id="policy:finance-duplicate",
+        revision=1,
+        created_at="2026-10-12T12:00:00Z",
+        resource_id=FINANCE_RESOURCE,
+        data_class="financial",
+        approval_rule=ApprovalRule.SINGLE_ISSUER,
+        eligible_issuer_refs=(RecordRef(id="principal:human", revision=1),),
+        commitment_refs=(),
+        allowed_transform_ids=(),
+        policy_revision=1,
+        status=RecordStatus.ACTIVE,
+    )
+    core.put_record(duplicate)
+    result = context.request_access(
+        make_request(
+            request_id="probe:class3",
+            intent_ref=intent_ref,
+            resource_id=None,
+            data_class="financial",
+        )
+    )
+    assert result.access_status == AccessStatus.CONFLICT
+
+
+def test_transform_run_failure_is_a_typed_denial(tmp_path: Path) -> None:
+    core, context, _runner, intent_ref = boot(tmp_path)
+    # prose payload: the affordability predicate cannot run on it
+    seed_extra_member(core, "fragment:res:finance-prose", text="just words, no json")
+    result = context.request_access(
+        make_request(
+            request_id="probe:prose",
+            intent_ref=intent_ref,
+            resource_id="fragment:res:finance-prose",
+            transform_id="FIXED_AFFORDABILITY_PREDICATE",
+        )
+    )
+    assert result.access_status == AccessStatus.DENIED
+    assert ReasonCode.UNSUPPORTED in result.reason_codes
+    assert result.view_ref is None
+    # the request is durable; no view/certificate was ever written
+    assert core.get_record("request:probe:prose") is not None
+    assert core.get_record("view:probe:prose") is None
+    assert core.get_record("certificate:probe:prose") is None
+
+
+def test_denied_replay_audits_once(tmp_path: Path) -> None:
+    core, context, _runner, intent_ref = boot(tmp_path)
+    request = make_request(request_id="probe:deny", intent_ref=intent_ref)
+    first = context.request_access(request)
+    second = context.request_access(request)
+    assert first.access_status == AccessStatus.DENIED
+    assert second.access_status == AccessStatus.DENIED
+    rows = core._conn.execute(
+        "SELECT count(*) FROM core_audit WHERE entity_ref = ?", (first.id,)
+    ).fetchone()[0]
+    assert rows == 1

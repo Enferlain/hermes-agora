@@ -556,20 +556,17 @@ class CoreStore(_Domain):
             return ()
         placeholders = ",".join("?" for _ in stages)
         rows = self._conn.execute(
-            "SELECT memory_id, revision FROM core_memory_scope"
-            " WHERE status = 'ACTIVE'"
-            " AND (scope_kind = 'AGENT' OR (scope_kind = ? AND scope_ref = ?))"
-            " AND (expiry_ms IS NULL OR expiry_ms > ?)"
-            f" AND stage IN ({placeholders})"
-            " ORDER BY memory_id",
+            "SELECT ms.memory_id, ms.revision FROM core_memory_scope ms"
+            " JOIN core_records r ON r.record_id = ms.memory_id AND r.revision = ms.revision"
+            " AND r.is_current = 1"
+            " WHERE ms.status = 'ACTIVE'"
+            " AND (ms.scope_kind = 'AGENT' OR (ms.scope_kind = ? AND ms.scope_ref = ?))"
+            " AND (ms.expiry_ms IS NULL OR ms.expiry_ms > ?)"
+            f" AND ms.stage IN ({placeholders})"
+            " ORDER BY ms.memory_id",
             (scope_kind, scope_ref, now_ms, *(stage.value for stage in stages)),
         ).fetchall()
-        eligible: list[RecordRef] = []
-        for row in rows:
-            current = self.current_ref(row["memory_id"])
-            if current is not None and current.revision == row["revision"]:
-                eligible.append(current)
-        return tuple(eligible)
+        return tuple(RecordRef(id=row["memory_id"], revision=row["revision"]) for row in rows)
 
     def verify_reference(
         self, ref: RecordRef, allowed: str | frozenset[str], *, label: str

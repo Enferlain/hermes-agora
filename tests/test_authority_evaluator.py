@@ -594,3 +594,94 @@ def test_data_class_request_combines_worst_case() -> None:
     assert evaluator.evaluate_class((granted, denied)).status == AccessStatus.DENIED
     assert evaluator.evaluate_class((granted,)).status == AccessStatus.GRANTED
     assert evaluator.evaluate_class(()).status == AccessStatus.DENIED
+
+
+# ---------------------------------------------------------------------------
+# Review(section 2) regressions
+# ---------------------------------------------------------------------------
+
+
+def test_all_listed_with_no_eligible_issuers_fails_closed() -> None:
+    """An empty eligible-issuer set must never satisfy the quorum vacuously."""
+    verdict = evaluator.evaluate(
+        case(
+            policies=(policy("policy:empty", approval_rule=ApprovalRule.ALL_LISTED, issuers=()),),
+            bindings=(),
+            authorizations=(authorization("use:empty", issuers=(), bindings=()),),
+        )
+    )
+    assert verdict.status == AccessStatus.PENDING_AUTHORITY
+    assert ReasonCode.AUTHORITY_MISSING in verdict.reason_codes
+    assert verdict.permitted_uses == ()
+
+
+def test_transform_output_precision_bounded_by_authorization() -> None:
+    """An ABSTRACT-max authorization must not yield a FIELDS projection."""
+    verdict = evaluator.evaluate(
+        case(
+            transform_id="FIXED_FIELD_VIEW",
+            authorizations=(
+                authorization(
+                    precision=RequestedPrecision.ABSTRACT,
+                    operations=(ResourceOperation.READ, ResourceOperation.TRANSFORM),
+                    transforms=("FIXED_FIELD_VIEW",),
+                ),
+            ),
+        )
+    )
+    assert verdict.status == AccessStatus.DENIED
+    assert ReasonCode.VIEW_FORBIDDEN in verdict.reason_codes
+
+
+def test_verdict_bindings_are_qualifying_only() -> None:
+    """A cited-but-revoked binding never appears as the authorizing chain."""
+    verdict = evaluator.evaluate(
+        case(
+            bindings=(
+                binding("binding:human-finance"),
+                binding("binding:human-finance-revoked", revoked_at=NOW),
+            ),
+            authorizations=(
+                authorization(
+                    bindings=("binding:human-finance", "binding:human-finance-revoked"),
+                ),
+            ),
+        )
+    )
+    assert verdict.status == AccessStatus.GRANTED
+    assert [b.id for b in verdict.bindings] == ["binding:human-finance"]
+
+
+def test_class_grant_merges_every_members_restrictions() -> None:
+    """A granted data-class verdict carries ALL members' commitments and
+    authorizations, and the INTERSECTION of permitted uses."""
+    member_a = case()  # finance: READ only -> INTERNAL_ONLY
+    member_b = case(
+        policies=(policy("policy:b", resource_id="fragment:res:b", commitments=("commit:b",)),),
+        bindings=(binding("binding:b", resource_id="fragment:res:b"),),
+        authorizations=(
+            authorization(
+                "use:b",
+                resource_id="fragment:res:b",
+                bindings=("binding:b",),
+                operations=(ResourceOperation.READ, ResourceOperation.EXPRESS),
+            ),
+        ),
+        commitments=(commitment("commit:b", resource_id="fragment:res:b"),),
+        resource_record=resource("fragment:res:b"),
+    )
+    verdict = evaluator.evaluate_class((member_a, member_b))
+    assert verdict.status == AccessStatus.GRANTED
+    assert {c.id for c in verdict.inherited_commitments} == {"commit:finance", "commit:b"}
+    assert {a.id for a in verdict.authorizations} == {"use:finance-fields", "use:b"}
+    # member A only permits internal use: the class view permits only that
+    assert verdict.permitted_uses == (IntendedUse.INTERNAL_ONLY,)
+
+
+def test_class_duplicate_policies_on_one_member_conflict() -> None:
+    member = case(
+        policies=(policy(), policy("policy:dup", issuers=(THIRD,))),
+    )
+    verdict = evaluator.evaluate_class((member,))
+    assert verdict.status == AccessStatus.CONFLICT
+    assert ReasonCode.AUTHORITY_CONFLICT in verdict.reason_codes

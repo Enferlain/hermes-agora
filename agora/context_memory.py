@@ -69,6 +69,7 @@ from agora.contracts import (
     SourceKind,
     TransformCertificate,
     UseAuthorization,
+    ValidationError,
     ViewKind,
     canonical_json_bytes,
     strict_json_loads,
@@ -239,6 +240,11 @@ class AuthorityEvaluator:
 
         required_domains = {_REQUIRED_DOMAIN[op] for op in operations}
         eligible = {ref.id for ref in policy.eligible_issuer_refs}
+        if not eligible:
+            # A policy with no configured eligible issuers can never meet
+            # quorum; ALL_LISTED would otherwise satisfy both the quorum and
+            # the chain-link check vacuously (review: no default-allow).
+            return _verdict(AccessStatus.PENDING_AUTHORITY, ReasonCode.AUTHORITY_MISSING)
         qualifying: list[AuthorityBinding] = []
         for domain in sorted(required_domains, key=lambda d: d.value):
             active = [
@@ -278,7 +284,7 @@ class AuthorityEvaluator:
         for authorization in candidates:
             denial = self._dimension_failure(case, authorization, operations, policy)
             if denial is None:
-                return self._granted(case, authorization, policy)
+                return self._granted(case, authorization, policy, qualifying)
             if first_denial is None:
                 first_denial = denial
         # No candidate grants: report the first candidate's failing dimension
@@ -304,6 +310,8 @@ class AuthorityEvaluator:
         if policy.approval_rule.value == "SINGLE_ISSUER":
             return bool(backed)
         distinct_issuers = {binding.issuer_ref.id for binding in qualifying}
+        if not distinct_issuers:
+            return False  # empty chain links nothing (no default allow)
         return {binding.issuer_ref.id for binding in backed} == distinct_issuers
 
     # -- steps ----------------------------------------------------------------
@@ -365,6 +373,15 @@ class AuthorityEvaluator:
         ):
             return ReasonCode.VIEW_FORBIDDEN
         if case.transform_id is not None:
+            # The transform's OUTPUT precision is bounded by the same
+            # ceiling: an ABSTRACT-max authorization must not yield a
+            # FIELDS projection (exact values above the ceiling).
+            spec = TRANSFORM_REGISTRY.get(case.transform_id)
+            if spec is not None and (
+                _PRECISION_RANK[spec.output_precision]
+                > _PRECISION_RANK[authorization.maximum_precision]
+            ):
+                return ReasonCode.VIEW_FORBIDDEN
             if case.transform_id not in authorization.allowed_transform_ids:
                 return ReasonCode.UNSUPPORTED
             if case.transform_id not in policy.allowed_transform_ids:
@@ -376,6 +393,7 @@ class AuthorityEvaluator:
         case: EvaluationInput,
         authorization: UseAuthorization,
         policy: ResourcePolicy,
+        qualifying: list[AuthorityBinding],
     ) -> AccessVerdict:
         permitted_uses = tuple(
             dict.fromkeys(
@@ -383,17 +401,15 @@ class AuthorityEvaluator:
             )
         )
         view_kind = _VIEW_KIND_FOR_PRECISION[case.requested_precision]
+        cited = {ref.id for ref in authorization.binding_refs}
         return _verdict(
             AccessStatus.GRANTED,
             view_kind=view_kind,
             authorizations=(authorization,),
-            bindings=tuple(
-                dict.fromkeys(
-                    binding
-                    for binding in case.bindings
-                    if any(ref.id == binding.id for ref in authorization.binding_refs)
-                )
-            ),
+            # Only qualifying (quorum-meeting, valid, right-domain) bindings
+            # the authorization actually cites back the grant — never
+            # expired/revoked ones that happen to share the citation list.
+            bindings=tuple(dict.fromkeys(binding for binding in qualifying if binding.id in cited)),
             inherited_commitments=self._attached_commitments(case, policy),
             permitted_uses=permitted_uses,
         )
@@ -402,12 +418,39 @@ class AuthorityEvaluator:
 
     def evaluate_class(self, cases: tuple[EvaluationInput, ...]) -> AccessVerdict:
         """A data-class request evaluates per member resource; the most-closed
-        verdict any member produces is the verdict (fail-closed combine)."""
+        verdict any member produces is the verdict. When every member grants,
+        the merged verdict carries the union of all members' authorizations,
+        bindings, and inherited commitments, and the intersection of
+        permitted uses — a member's restrictions can never be dropped from
+        the class view its fragment ships in (review MAJOR)."""
         if not cases:
             return _verdict(AccessStatus.DENIED, ReasonCode.POLICY_FORBIDDEN)
         verdicts = [self.evaluate(case) for case in cases]
         worst = max(verdicts, key=lambda verdict: _STATUS_PRECEDENCE[verdict.status])
-        return worst
+        if worst.status != AccessStatus.GRANTED:
+            return worst
+        uses = tuple(dict.fromkeys(use for verdict in verdicts for use in verdict.permitted_uses))
+        for verdict in verdicts:
+            uses = tuple(use for use in uses if use in verdict.permitted_uses)
+        return AccessVerdict(
+            status=AccessStatus.GRANTED,
+            reason_codes=(),
+            view_kind=worst.view_kind,
+            authorizations=tuple(
+                dict.fromkeys(auth for verdict in verdicts for auth in verdict.authorizations)
+            ),
+            bindings=tuple(
+                dict.fromkeys(binding for verdict in verdicts for binding in verdict.bindings)
+            ),
+            inherited_commitments=tuple(
+                dict.fromkeys(
+                    commitment
+                    for verdict in verdicts
+                    for commitment in verdict.inherited_commitments
+                )
+            ),
+            permitted_uses=uses,
+        )
 
 
 class ContextMemory:
@@ -483,9 +526,13 @@ class ContextMemory:
             class_resource_id = request.resource_id
         else:
             assert request.data_class is not None
-            members = tuple(
-                policy for policy in all_policies if policy.data_class == request.data_class
-            )
+            # One case per MEMBER RESOURCE (all its policies together), not
+            # per policy — duplicate active policies on one resource must
+            # surface the CONFLICT verdict on the class path too (review).
+            grouped: dict[str, list[ResourcePolicy]] = {}
+            for policy in all_policies:
+                if policy.data_class == request.data_class:
+                    grouped.setdefault(policy.resource_id, []).append(policy)
             cases = tuple(
                 EvaluationInput(
                     intended_use=request.intended_use,
@@ -493,14 +540,14 @@ class ContextMemory:
                     transform_id=request.transform_id,
                     intent=intent if isinstance(intent, Intent) else None,
                     audience=audience if isinstance(audience, AudienceSnapshot) else None,
-                    resource=self._fragment_or_none(policy.resource_id),
-                    policies=(policy,),
+                    resource=self._fragment_or_none(resource_id),
+                    policies=tuple(sorted(policies, key=lambda p: p.id)),
                     bindings=all_bindings,
                     authorizations=all_authorizations,
                     commitments=all_commitments,
                     now=now,
                 )
-                for policy in members
+                for resource_id, policies in sorted(grouped.items())
             )
             class_resource_id = request.data_class
         assert class_resource_id is not None
@@ -538,15 +585,11 @@ class ContextMemory:
             authorization_refs = tuple(
                 RecordRef(id=auth.id, revision=auth.revision) for auth in verdict.authorizations
             )
-            audience_bounds = tuple(
-                sorted(
-                    {
-                        bound
-                        for auth in verdict.authorizations
-                        for bound in auth.audience_class_bounds
-                    }
-                )
-            )
+            # With several merged authorizations (data-class grants) the
+            # bounds are the INTERSECTION: the view is only valid where
+            # every granting member allows it (fail-closed).
+            bounds_sets = [set(auth.audience_class_bounds) for auth in verdict.authorizations]
+            audience_bounds = tuple(sorted(set.intersection(*bounds_sets))) if bounds_sets else ()
             valid_until = min(
                 (
                     auth.valid_until
@@ -581,9 +624,21 @@ class ContextMemory:
         transform_records: tuple[Record, ...] = ()
         source_view = view
         if granted and view is not None and request.transform_id is not None:
-            view, certificate, transform_records = self._apply_transform(
-                request, view, verdict, now
-            )
+            try:
+                view, certificate, transform_records = self._apply_transform(
+                    request, view, verdict, now
+                )
+            except ValueError, ValidationError:
+                # Authority granted but the transform cannot run on this
+                # input (multi-member source, non-JSON payload, missing
+                # parameters): a typed no-data result, never an aborted
+                # turn with a dangling request (review).
+                view = None
+                certificate = None
+                transform_records = ()
+                source_view = None
+                verdict = _verdict(AccessStatus.DENIED, ReasonCode.UNSUPPORTED)
+                granted = False
         result = MemoryAccessResult(
             id=f"result:{request.request_id}",
             revision=1,
@@ -619,13 +674,21 @@ class ContextMemory:
         )
         self.core.put_records(batch)
         if not granted and verdict.reason_codes:
-            self.core.audit(
-                operation="access",
-                entity_ref=result.id,
-                reason_code=verdict.reason_codes[0].value,
-                version_refs=(request.id,),
-                at_ms=self.clock.now_ms(),
-            )
+            # Replay-dedup: records re-insert byte-identically, but the
+            # audit log has no natural key — skip the row if the same
+            # denial was already audited for this result (review).
+            already = self.core._conn.execute(
+                "SELECT 1 FROM core_audit WHERE entity_ref = ? AND reason_code = ? LIMIT 1",
+                (result.id, verdict.reason_codes[0].value),
+            ).fetchone()
+            if already is None:
+                self.core.audit(
+                    operation="access",
+                    entity_ref=result.id,
+                    reason_code=verdict.reason_codes[0].value,
+                    version_refs=(request.id,),
+                    at_ms=self.clock.now_ms(),
+                )
         return result
 
     def _apply_transform(
@@ -758,9 +821,12 @@ class ContextMemory:
         )
         return output_view, certificate, (coverage, output_fragment, certificate, output_view)
 
-    def eligible_episode_fragments(self, episode_ref: RecordRef) -> tuple[RecordRef, ...]:
-        """Recent ingested fragments for an episode, newest last, within the
-        fixture bounds (last 20 events, 16 KiB, whole-fragment omission)."""
+    def eligible_episode_fragments(
+        self, episode_ref: RecordRef
+    ) -> tuple[tuple[RecordRef, ...], int]:
+        """Recent ingested fragments for an episode, newest last, and the
+        bytes they consumed — the budget is SHARED with memory fragments
+        (handoff §6.4: one 16 KiB serialized social-content limit)."""
         rows = self.core._conn.execute(
             "SELECT fragment_refs FROM core_ingestion ORDER BY journal_seq DESC LIMIT ?",
             (MAX_SELECTED_EVENTS,),
@@ -772,18 +838,27 @@ class ContextMemory:
                 ref = self.core.current_ref(fragment_id)
                 if ref is None:
                     continue
-                size = self._payload_size(f"payload:fragment:{fragment_id}")
+                fragment_record = self.core.get_record(ref.id, ref.revision)
+                if not isinstance(fragment_record, ContentFragment):
+                    continue
+                # size via the fragment's own payload ref — the previous
+                # convention-based lookup never matched the runner's payload
+                # ids, silently zeroing the budget (latent M1 bug, flushed
+                # out by the section-3 review)
+                size = self._payload_size(fragment_record.payload_ref)
                 if total + size > MAX_CONTEXT_BYTES:
                     continue  # omit excess whole fragments, keep metadata
                 total += size
                 selected.append(ref)
-        return tuple(reversed(selected))
+        return tuple(reversed(selected)), total
 
-    def _eligible_memory_fragments(self, destination_id: str) -> tuple[RecordRef, ...]:
+    def _eligible_memory_fragments(
+        self, destination_id: str, remaining_bytes: int
+    ) -> tuple[RecordRef, ...]:
         """Eligible memory assertion fragments for one destination scope,
-        within the shared context byte budget. Eligibility is filtered on
-        the scope index before any payload is read; deterministically in
-        memory id order."""
+        within the REMAINING shared context byte budget. Eligibility is
+        filtered on the scope index before any payload is read;
+        deterministically in memory id order."""
         memory_refs = self.core.eligible_memory_refs(
             scope_kind=ScopeKind.ROOM.value,
             scope_ref=destination_id,
@@ -801,8 +876,10 @@ class ContextMemory:
             )
             if not isinstance(fragment_record, ContentFragment):
                 continue
+            if fragment_record.eligibility_status != EligibilityStatus.ACTIVE:
+                continue  # superseded/tombstoned assertions never re-enter
             size = self._payload_size(fragment_record.payload_ref)
-            if total + size > MAX_CONTEXT_BYTES:
+            if total + size > remaining_bytes:
                 continue  # omit excess whole fragments, keep metadata
             total += size
             selected.append(RecordRef(id=fragment_record.id, revision=fragment_record.revision))
@@ -827,6 +904,13 @@ class ContextMemory:
             raise MemoryStateError(
                 ReasonCode.POLICY_FORBIDDEN,
                 f"promotion {memory.stage.value} -> {target_stage.value} does not advance",
+            )
+        if target_stage is MemoryStage.DURABLE and memory.stage is not MemoryStage.CANDIDATE:
+            # §6.4: DURABLE promotion requires an existing CANDIDATE
+            # revision — no skipping the curation stage (review).
+            raise MemoryStateError(
+                ReasonCode.POLICY_FORBIDDEN,
+                f"DURABLE promotion requires a CANDIDATE memory, got {memory.stage.value}",
             )
         promoted = MemoryRecord(
             id=memory.id,
@@ -926,6 +1010,15 @@ class ContextMemory:
         record = self.core.get_record(memory_ref.id, memory_ref.revision)
         if not isinstance(record, MemoryRecord):
             raise MemoryStateError(ReasonCode.INVALID_REFERENCE, f"{memory_ref.id} is not a memory")
+        if record.status != MemoryStatus.ACTIVE:
+            # Invalidated (STALE) or removed (TOMBSTONED) memories cannot be
+            # promoted or corrected back to relevance (review: invalidation
+            # bypass through the module's own public API).
+            raise MemoryStateError(
+                ReasonCode.POLICY_FORBIDDEN,
+                f"memory {memory_ref.id} is {record.status.value}: invalidated content"
+                " cannot be promoted or corrected",
+            )
         return record
 
     def _memory_expiry(self, memory_id: str, revision: int) -> int | None:
@@ -938,24 +1031,35 @@ class ContextMemory:
     def _invalidate_dependents(self, fragment_id: str, fragment_revision: int, now: str) -> None:
         """Corrections invalidate what was derived from the superseded
         assertion (§6.3). Only dependents whose captured version actually
-        matches the superseded fragment are affected."""
+        matches the superseded fragment are affected; flipped revisions
+        carry the correction time as their creation time."""
         for child_id in self.core.children_of(fragment_id):
             record = self.core.get_record(child_id)
             if isinstance(record, Derivation):
                 if not _vector_cites(record.input_version_vector, fragment_id, fragment_revision):
                     continue
                 self.core.put_record(
-                    replace(record, revision=record.revision + 1, state=DerivationState.STALE)
+                    replace(
+                        record,
+                        revision=record.revision + 1,
+                        created_at=now,
+                        state=DerivationState.STALE,
+                    )
                 )
-                self._stale_output_memory(record.output_fragment_ref)
+                self._stale_output_memory(record.output_fragment_ref, now)
             elif isinstance(record, ContextSnapshot):
                 if not _vector_cites(record.version_vector, fragment_id, fragment_revision):
                     continue
                 self.core.put_record(
-                    replace(record, revision=record.revision + 1, status=SnapshotStatus.INVALID)
+                    replace(
+                        record,
+                        revision=record.revision + 1,
+                        created_at=now,
+                        status=SnapshotStatus.INVALID,
+                    )
                 )
 
-    def _stale_output_memory(self, output_fragment_ref: RecordRef) -> None:
+    def _stale_output_memory(self, output_fragment_ref: RecordRef, now: str) -> None:
         """A derivation's retained output memory becomes ineligible: the
         scope-index row flips STALE with a new memory revision."""
         rows = self.core._conn.execute(
@@ -968,7 +1072,12 @@ class ContextMemory:
             if not isinstance(record, MemoryRecord) or record.status == MemoryStatus.STALE:
                 continue
             self.core.promote_memory(
-                replace(record, revision=record.revision + 1, status=MemoryStatus.STALE),
+                replace(
+                    record,
+                    revision=record.revision + 1,
+                    created_at=now,
+                    status=MemoryStatus.STALE,
+                ),
                 expiry_ms=self._memory_expiry(record.id, record.revision),
             )
 
@@ -993,10 +1102,12 @@ class ContextMemory:
         an externally effect-capable snapshot, a DM included. The failure is
         here, never deferred to dispatch, and it is not reviewer-waivable."""
         admitted = self._admit_views(active_view_refs, effect_capable=effect_capable)
-        episode = self.eligible_episode_fragments(episode_ref) if episode_ref else ()
+        episode, used_bytes = (
+            self.eligible_episode_fragments(episode_ref) if episode_ref else ((), 0)
+        )
         audience = self.core.get_record(audience_ref.id, audience_ref.revision)
         memories = (
-            self._eligible_memory_fragments(audience.destination_id)
+            self._eligible_memory_fragments(audience.destination_id, MAX_CONTEXT_BYTES - used_bytes)
             if isinstance(audience, AudienceSnapshot)
             else ()
         )
