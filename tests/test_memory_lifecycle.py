@@ -9,9 +9,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from agora.context_memory import ContextMemory
 from agora.contracts import (
     AssertionStatus,
     ContentFragment,
+    ContextSnapshot,
     EligibilityStatus,
     FragmentKind,
     InstructionAuthority,
@@ -243,3 +247,185 @@ def test_snapshot_includes_eligible_memory_fragments(tmp_path: Path) -> None:
     covered = [ref.id for ref in coverage.input_fragment_refs]
     assert "fragment:memory:memory:room" in covered
     assert "fragment:memory:memory:other-room" not in covered
+
+
+# ---------------------------------------------------------------------------
+# Task 3.2: staged promotion and corrections
+# ---------------------------------------------------------------------------
+
+
+def test_promotion_never_widens_scope(tmp_path: Path) -> None:
+    from agora.stores import CoreStore as Store
+
+    core = Store(tmp_path / "core.sqlite")
+    context = _context_for(core)
+    seed_memory(core, "memory:cand", scope_ref="room:a", stage=MemoryStage.CANDIDATE)
+    promoted = context.stage_memory(RecordRef(id="memory:cand", revision=1), MemoryStage.DURABLE)
+    assert promoted.revision == 2
+    rows = core.memory_scope_rows("memory:cand")
+    assert [row["revision"] for row in rows] == [1, 2]
+    assert rows[1]["stage"] == "DURABLE"
+    assert rows[1]["scope_kind"] == "ROOM" and rows[1]["scope_ref"] == "room:a"
+    # DURABLE in room:a does NOT confer eligibility elsewhere
+    assert [
+        ref.id
+        for ref in core.eligible_memory_refs(
+            scope_kind=ScopeKind.ROOM.value, scope_ref="room:a", now_ms=NOW_MS
+        )
+    ] == ["memory:cand"]
+    assert (
+        core.eligible_memory_refs(
+            scope_kind=ScopeKind.ROOM.value, scope_ref="room:other", now_ms=NOW_MS
+        )
+        == ()
+    )
+    # agent-scoped ordinary memory stays cross-context after promotion
+    seed_memory(core, "memory:own", scope_kind=ScopeKind.AGENT, scope_ref="agent")
+    context.stage_memory(RecordRef(id="memory:own", revision=1), MemoryStage.CANDIDATE)
+    both = core.eligible_memory_refs(
+        scope_kind=ScopeKind.ROOM.value, scope_ref="room:anywhere", now_ms=NOW_MS
+    )
+    assert [ref.id for ref in both] == ["memory:own"]
+
+
+def test_non_forward_promotion_rejected(tmp_path: Path) -> None:
+    from agora.context_memory import MemoryStateError
+    from agora.stores import CoreStore as Store
+
+    core = Store(tmp_path / "core.sqlite")
+    context = _context_for(core)
+    seed_memory(core, "memory:s", stage=MemoryStage.SOCIAL)
+    with pytest.raises(MemoryStateError):
+        context.stage_memory(RecordRef(id="memory:s", revision=1), MemoryStage.SOCIAL)
+    with pytest.raises(MemoryStateError):
+        context.stage_memory(RecordRef(id="memory:s", revision=1), MemoryStage.EPHEMERAL)
+
+
+def test_stale_promotion_blocked_on_version_mismatch(tmp_path: Path) -> None:
+    from agora.context_memory import MemoryStateError
+    from agora.stores import CoreStore as Store
+
+    core = Store(tmp_path / "core.sqlite")
+    context = _context_for(core)
+    seed_memory(core, "memory:src")
+    context.correct_memory(RecordRef(id="memory:src", revision=1), "corrected fact")
+    # a promotion proposal citing the superseded revision is stale
+    with pytest.raises(MemoryStateError):
+        context.stage_memory(RecordRef(id="memory:src", revision=1), MemoryStage.DURABLE)
+
+
+def test_correction_supersedes_and_invalidates_derivations(tmp_path: Path) -> None:
+    from agora.contracts import DependencyKind, Derivation, DerivationState, ProducerKind
+
+    core = CoreStore(tmp_path / "core.sqlite")
+    context = _context_for(core)
+    seed_memory(core, "memory:src", text="original fact")
+
+    # a summary derived from the source assertion, retained as a memory
+    # (seed_memory creates fragment:memory:memory:summary + the record)
+    seed_memory(core, "memory:summary", text="summary of original", stage=MemoryStage.CANDIDATE)
+    summary_fragment_id = "fragment:memory:memory:summary"
+    coverage = ProducerCoverage(
+        id="coverage:summary",
+        revision=1,
+        created_at=ANCHOR,
+        producer_kind=ProducerKind.SUMMARY,
+        input_fragment_refs=(RecordRef(id="fragment:memory:memory:src", revision=1),),
+        input_view_refs=(),
+        input_intent_refs=(),
+        input_policy_refs=(),
+        sink_ref=None,
+        call_id="summary:1",
+        runtime_epoch=core.runtime_epoch,
+    )
+    core.put_record(coverage)
+    core.put_record(
+        Derivation(
+            id="derivation:summary",
+            revision=1,
+            created_at=ANCHOR,
+            output_fragment_ref=RecordRef(id=summary_fragment_id, revision=1),
+            producer_coverage_ref=RecordRef(id=coverage.id, revision=1),
+            claimed_parent_refs=(RecordRef(id="fragment:memory:memory:src", revision=1),),
+            transform_id=None,
+            authorization_refs=(),
+            inherited_commitment_refs=(),
+            input_version_vector=(RecordRef(id="fragment:memory:memory:src", revision=1),),
+            state=DerivationState.CURRENT,
+        )
+    )
+    core.add_dependency(
+        RecordRef(id="derivation:summary", revision=1),
+        RecordRef(id="fragment:memory:memory:src", revision=1),
+        DependencyKind.PRODUCER_INPUT,
+    )
+    seed_memory(
+        core,
+        "memory:summary",
+        text="summary of original",
+        stage=MemoryStage.CANDIDATE,
+    )
+
+    corrected = context.correct_memory(RecordRef(id="memory:src", revision=1), "corrected fact")
+    assert corrected.revision == 2
+    source_memory = core.get_record("memory:src")
+    assert isinstance(source_memory, MemoryRecord)
+    assert source_memory.supersedes_ref == RecordRef(id="memory:src", revision=1)
+
+    derivation = core.get_record("derivation:summary")
+    assert isinstance(derivation, Derivation)
+    assert derivation.state == DerivationState.STALE  # stale summary after correction
+    summary_memory = core.get_record("memory:summary")
+    assert isinstance(summary_memory, MemoryRecord)
+    assert summary_memory.status == MemoryStatus.STALE  # payload ineligible
+    selected = core.eligible_memory_refs(
+        scope_kind=ScopeKind.ROOM.value, scope_ref="room:a", now_ms=NOW_MS
+    )
+    assert "memory:summary" not in [ref.id for ref in selected]
+    assert "memory:src" in [ref.id for ref in selected]  # the correction itself
+
+
+def test_correction_invalidates_snapshots_built_on_the_old_assertion(tmp_path: Path) -> None:
+    from tests.test_request_access import boot
+
+    core, context, _runner, intent_ref = boot(tmp_path)
+    seed_memory(core, "memory:room", scope_ref="room:public", text="original room fact")
+    snapshot = context.build_snapshot(
+        identity_ref=RecordRef(id="identity:agent", revision=1),
+        intent_ref=intent_ref,
+        audience_ref=RecordRef(id="audience:room:public", revision=1),
+        episode_ref=None,
+        sink_ref=RecordRef(id="sink:scripted", revision=1),
+        effect_capable=False,
+        call_id="snapshot:before-correction",
+    )
+    assert snapshot.status.value == "ACTIVE"
+    context.correct_memory(RecordRef(id="memory:room", revision=1), "corrected room fact")
+    invalidated = core.get_record(snapshot.id)
+    assert isinstance(invalidated, ContextSnapshot)
+    assert invalidated.status.value == "INVALID"
+
+
+def _plain_provenance() -> Provenance:
+    return Provenance(
+        producer_ref=RecordRef(id="principal:agent", revision=1),
+        source_kind=SourceKind.SOCIAL_MESSAGE,
+        origin_event_ref=None,
+        claimed_speaker_ref=None,
+        instruction_authority=InstructionAuthority.NONE,
+        integrity=Integrity.EXTERNAL_UNVERIFIED,
+        custodian_refs=(),
+        subject_refs=(),
+        original_audience_ref=None,
+        assertion_status=AssertionStatus.OBSERVED_STATEMENT,
+        producer_coverage_ref=None,
+        model_claimed_parent_refs=(),
+        occurred_at=ANCHOR,
+        observed_at=ANCHOR,
+    )
+
+
+def _context_for(core: CoreStore) -> ContextMemory:
+    from agora.ports import VirtualClock
+
+    return ContextMemory(core, VirtualClock(ANCHOR))

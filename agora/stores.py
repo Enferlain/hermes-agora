@@ -807,6 +807,16 @@ class CoreStore(_Domain):
         ).fetchall()
         return tuple(row["parent_ref"] for row in rows)
 
+    def children_of(self, parent_id: str) -> tuple[str, ...]:
+        """Direct dependents of one record (indexed; invalidation walks
+        these, handoff §7 core.dependencies)."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT child_ref FROM core_dependencies WHERE parent_ref = ?"
+            " ORDER BY child_ref",
+            (parent_id,),
+        ).fetchall()
+        return tuple(row["child_ref"] for row in rows)
+
     # -- audit ---------------------------------------------------------------
 
     def audit(

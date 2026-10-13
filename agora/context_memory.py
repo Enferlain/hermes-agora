@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from agora.contracts import (
@@ -36,6 +36,8 @@ from agora.contracts import (
     ContentFragment,
     ContextSnapshot,
     DependencyKind,
+    Derivation,
+    DerivationState,
     EligibilityStatus,
     EnvelopePurpose,
     ExposureClass,
@@ -48,6 +50,7 @@ from agora.contracts import (
     MemoryAccessResult,
     MemoryRecord,
     MemoryStage,
+    MemoryStatus,
     MemoryView,
     ModelCallEnvelope,
     Pair,
@@ -76,6 +79,26 @@ from agora.transforms import TRANSFORM_REGISTRY, discharged_by, transform_spec
 
 MAX_SELECTED_EVENTS = 20
 MAX_CONTEXT_BYTES = 16 * 1024
+
+_STAGE_ORDER: dict[MemoryStage, int] = {
+    MemoryStage.EPHEMERAL: 0,
+    MemoryStage.SOCIAL: 1,
+    MemoryStage.CANDIDATE: 2,
+    MemoryStage.DURABLE: 3,
+}
+
+
+class MemoryStateError(Exception):
+    """Typed memory-lifecycle failure with a registry reason code."""
+
+    def __init__(self, code: ReasonCode, detail: str) -> None:
+        super().__init__(f"{code.value}: {detail}")
+        self.code = code
+
+
+def _vector_cites(vector: tuple[RecordRef, ...], record_id: str, revision: int) -> bool:
+    return any(ref.id == record_id and ref.revision == revision for ref in vector)
+
 
 # ---------------------------------------------------------------------------
 # Authority evaluation (M2 design D1/D2): pure core, fixed order, fail-closed
@@ -781,6 +804,163 @@ class ContextMemory:
             (payload_id,),
         ).fetchone()
         return row["n"] if row is not None else 0
+
+    # -- staged promotion and corrections (M2 task 3.2, §6.3) ---------------
+
+    def stage_memory(self, memory_ref: RecordRef, target_stage: MemoryStage) -> RecordRef:
+        """Explicit staged promotion: EPHEMERAL → SOCIAL/CANDIDATE → DURABLE,
+        always forward, never widening scope (scope is carried unchanged —
+        no BROAD inference from DURABLE). Blocked with SUPERSEDED when the
+        proposal cites a revision the memory has moved past."""
+        memory = self._current_memory_or_error(memory_ref)
+        if _STAGE_ORDER[target_stage] <= _STAGE_ORDER[memory.stage]:
+            raise MemoryStateError(
+                ReasonCode.POLICY_FORBIDDEN,
+                f"promotion {memory.stage.value} -> {target_stage.value} does not advance",
+            )
+        promoted = MemoryRecord(
+            id=memory.id,
+            revision=memory.revision + 1,
+            created_at=self.clock.now_rfc3339(),
+            assertion_fragment_ref=memory.assertion_fragment_ref,
+            stage=target_stage,
+            scope_kind=memory.scope_kind,
+            scope_ref=memory.scope_ref,
+            custodian_refs=memory.custodian_refs,
+            subject_refs=memory.subject_refs,
+            commitment_refs=memory.commitment_refs,
+            assertion_status=memory.assertion_status,
+            supersedes_ref=None,
+            valid_until=memory.valid_until,
+            status=MemoryStatus.ACTIVE,
+        )
+        self.core.promote_memory(
+            promoted, expiry_ms=self._memory_expiry(memory.id, memory.revision)
+        )
+        return RecordRef(id=promoted.id, revision=promoted.revision)
+
+    def correct_memory(self, memory_ref: RecordRef, corrected_text: str) -> RecordRef:
+        """Correction: a new assertion revision supersedes the cited one
+        (same stage/scope — corrections do not move scope either), and
+        everything derived from the superseded assertion is invalidated via
+        the dependency graph: derivations flip STALE, their retained output
+        memories flip STALE (payload ineligible through the scope index),
+        and affected snapshots flip INVALID."""
+        memory = self._current_memory_or_error(memory_ref)
+        now = self.clock.now_rfc3339()
+        fragment_id = f"fragment:memory:{memory.id}:{memory.revision + 1}"
+        self.core.put_payload(f"payload:{fragment_id}", corrected_text, owner_ref=memory.id)
+        self.core.put_record(
+            ContentFragment(
+                id=fragment_id,
+                revision=1,
+                created_at=now,
+                kind=FragmentKind.TEXT,
+                payload_ref=f"payload:{fragment_id}",
+                provenance=Provenance(
+                    producer_ref=RecordRef(id="principal:agent", revision=1),
+                    source_kind=SourceKind.MEMORY,
+                    origin_event_ref=None,
+                    claimed_speaker_ref=None,
+                    instruction_authority=InstructionAuthority.AGENT_STATE,
+                    integrity=Integrity.DERIVED,
+                    custodian_refs=(),
+                    subject_refs=(),
+                    original_audience_ref=None,
+                    assertion_status=AssertionStatus.OBSERVED_STATEMENT,
+                    producer_coverage_ref=None,
+                    model_claimed_parent_refs=(),
+                    occurred_at=now,
+                    observed_at=now,
+                ),
+                commitment_refs=memory.commitment_refs,
+                eligibility_status=EligibilityStatus.ACTIVE,
+            )
+        )
+        corrected = MemoryRecord(
+            id=memory.id,
+            revision=memory.revision + 1,
+            created_at=now,
+            assertion_fragment_ref=RecordRef(id=fragment_id, revision=1),
+            stage=memory.stage,
+            scope_kind=memory.scope_kind,
+            scope_ref=memory.scope_ref,
+            custodian_refs=memory.custodian_refs,
+            subject_refs=memory.subject_refs,
+            commitment_refs=memory.commitment_refs,
+            assertion_status=memory.assertion_status,
+            supersedes_ref=RecordRef(id=memory.id, revision=memory.revision),
+            valid_until=memory.valid_until,
+            status=MemoryStatus.ACTIVE,
+        )
+        self.core.promote_memory(
+            corrected, expiry_ms=self._memory_expiry(memory.id, memory.revision)
+        )
+        self._invalidate_dependents(
+            memory.assertion_fragment_ref.id, memory.assertion_fragment_ref.revision, now
+        )
+        return RecordRef(id=corrected.id, revision=corrected.revision)
+
+    def _current_memory_or_error(self, memory_ref: RecordRef) -> MemoryRecord:
+        current = self.core.current_ref(memory_ref.id)
+        if current is None:
+            raise MemoryStateError(
+                ReasonCode.INVALID_REFERENCE, f"memory {memory_ref.id} does not exist"
+            )
+        if current.revision != memory_ref.revision:
+            raise MemoryStateError(
+                ReasonCode.SUPERSEDED,
+                f"memory {memory_ref.id} is at revision {current.revision},"
+                f" proposal cites {memory_ref.revision}",
+            )
+        record = self.core.get_record(memory_ref.id, memory_ref.revision)
+        if not isinstance(record, MemoryRecord):
+            raise MemoryStateError(ReasonCode.INVALID_REFERENCE, f"{memory_ref.id} is not a memory")
+        return record
+
+    def _memory_expiry(self, memory_id: str, revision: int) -> int | None:
+        rows = self.core.memory_scope_rows(memory_id)
+        for row in rows:
+            if row["revision"] == revision:
+                return row["expiry_ms"]
+        return None
+
+    def _invalidate_dependents(self, fragment_id: str, fragment_revision: int, now: str) -> None:
+        """Corrections invalidate what was derived from the superseded
+        assertion (§6.3). Only dependents whose captured version actually
+        matches the superseded fragment are affected."""
+        for child_id in self.core.children_of(fragment_id):
+            record = self.core.get_record(child_id)
+            if isinstance(record, Derivation):
+                if not _vector_cites(record.input_version_vector, fragment_id, fragment_revision):
+                    continue
+                self.core.put_record(
+                    replace(record, revision=record.revision + 1, state=DerivationState.STALE)
+                )
+                self._stale_output_memory(record.output_fragment_ref)
+            elif isinstance(record, ContextSnapshot):
+                if not _vector_cites(record.version_vector, fragment_id, fragment_revision):
+                    continue
+                self.core.put_record(
+                    replace(record, revision=record.revision + 1, status=SnapshotStatus.INVALID)
+                )
+
+    def _stale_output_memory(self, output_fragment_ref: RecordRef) -> None:
+        """A derivation's retained output memory becomes ineligible: the
+        scope-index row flips STALE with a new memory revision."""
+        rows = self.core._conn.execute(
+            "SELECT DISTINCT memory_id FROM core_memory_scope WHERE assertion_ref = ?",
+            (output_fragment_ref.id,),
+        ).fetchall()
+        for row in rows:
+            current = self.core.current_ref(row["memory_id"])
+            record = self.core.get_record(row["memory_id"], current.revision) if current else None
+            if not isinstance(record, MemoryRecord) or record.status == MemoryStatus.STALE:
+                continue
+            self.core.promote_memory(
+                replace(record, revision=record.revision + 1, status=MemoryStatus.STALE),
+                expiry_ms=self._memory_expiry(record.id, record.revision),
+            )
 
     def build_snapshot(
         self,
