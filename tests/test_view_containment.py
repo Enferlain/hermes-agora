@@ -174,10 +174,70 @@ def test_view_with_expression_use_admitted_and_inherits_restrictions(tmp_path: P
         )
     )
     assert result.view_ref is not None
-    snapshot = build(context, intent_ref, call_id="snap:express", views=(result.view_ref,))
+    # the view enters only under the intent it was granted for
+    snapshot = build(context, coordination, call_id="snap:express", views=(result.view_ref,))
     assert [ref.id for ref in snapshot.active_view_refs] == [result.view_ref.id]
     # the joint STRONG commitment is inherited into the snapshot for §8 routing
     assert "commit:joint-strong" in [ref.id for ref in snapshot.inherited_commitment_refs]
+    # a DIFFERENT intent (the mechanical social-participation one) does not
+    # satisfy the granting authorization: admission fails (imi feedback)
+    with pytest.raises(ViewAdmissionError) as excinfo:
+        build(context, intent_ref, call_id="snap:wrong-intent", views=(result.view_ref,))
+    assert excinfo.value.code.value == "VIEW_FORBIDDEN"
+
+
+def test_view_granted_for_public_room_not_reusable_elsewhere(tmp_path: Path) -> None:
+    core, context, _runner, intent_ref = boot(tmp_path)
+    coordination = coordination_intent(core, intent_ref)
+    result = context.request_access(
+        make_request(
+            request_id="probe:joint2",
+            intent_ref=coordination,
+            resource_id=JOINT_RESOURCE,
+            intended_use=IntendedUse.EXPRESSION,
+            precision=RequestedPrecision.ABSTRACT,
+        )
+    )
+    assert result.view_ref is not None
+    dm = dm_audience_ref(core, "room:dm")
+    with pytest.raises(ViewAdmissionError) as excinfo:
+        build(
+            context,
+            coordination,
+            call_id="snap:other-room",
+            views=(result.view_ref,),
+            audience=dm,
+        )
+    assert excinfo.value.code.value == "VIEW_FORBIDDEN"
+
+
+def test_expired_view_fails_admission(tmp_path: Path) -> None:
+    from dataclasses import replace as dc_replace
+
+    from agora.contracts import MemoryView
+
+    core, context, _runner, intent_ref = boot(tmp_path)
+    result = context.request_access(
+        make_request(request_id="probe:fin2", intent_ref=intent_ref, resource_id=FINANCE_RESOURCE)
+    )
+    assert result.view_ref is not None
+    view = core.get_record(result.view_ref.id, result.view_ref.revision)
+    assert isinstance(view, MemoryView)
+    expired = dc_replace(
+        view,
+        revision=view.revision + 1,
+        valid_until="2026-10-11T00:00:00Z",  # before the frozen clock's now
+    )
+    core.put_record(expired)
+    with pytest.raises(ViewAdmissionError) as excinfo:
+        build(
+            context,
+            intent_ref,
+            call_id="snap:expired",
+            views=(RecordRef(id=expired.id, revision=expired.revision),),
+            effect_capable=False,
+        )
+    assert excinfo.value.code.value == "STALE_CONTEXT"
 
 
 def test_transform_output_view_is_also_strongly_internal_only(tmp_path: Path) -> None:

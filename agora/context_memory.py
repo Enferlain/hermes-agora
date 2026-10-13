@@ -1030,9 +1030,19 @@ class ContextMemory:
 
     def _invalidate_dependents(self, fragment_id: str, fragment_revision: int, now: str) -> None:
         """Corrections invalidate what was derived from the superseded
-        assertion (§6.3). Only dependents whose captured version actually
-        matches the superseded fragment are affected; flipped revisions
-        carry the correction time as their creation time."""
+        assertion, transitively: a summary-of-a-summary chain propagates
+        all the way down (source → summary A → summary B → snapshot), not
+        one level (imi feedback on task 3). Only dependents whose captured
+        version actually matches are affected; flipped revisions carry the
+        correction time as their creation time."""
+        self._invalidate_from(fragment_id, fragment_revision, now, set())
+
+    def _invalidate_from(
+        self, fragment_id: str, fragment_revision: int, now: str, visited: set[str]
+    ) -> None:
+        if fragment_id in visited:
+            return
+        visited.add(fragment_id)
         for child_id in self.core.children_of(fragment_id):
             record = self.core.get_record(child_id)
             if isinstance(record, Derivation):
@@ -1047,6 +1057,14 @@ class ContextMemory:
                     )
                 )
                 self._stale_output_memory(record.output_fragment_ref, now)
+                # whatever was derived from THIS derivation's output is
+                # built on stale content too — keep walking the graph
+                self._invalidate_from(
+                    record.output_fragment_ref.id,
+                    record.output_fragment_ref.revision,
+                    now,
+                    visited,
+                )
             elif isinstance(record, ContextSnapshot):
                 if not _vector_cites(record.version_vector, fragment_id, fragment_revision):
                     continue
@@ -1099,13 +1117,20 @@ class ContextMemory:
         Admitted views are checked structurally at build time (task 3.3): a
         view whose permitted uses are internal-only — whether backed by a
         STRONG commitment or constructed so by a transform — can never enter
-        an externally effect-capable snapshot, a DM included. The failure is
+        an externally effect-capable snapshot, a DM included; a view is also
+        bound to the audience and purpose it was granted for. The failure is
         here, never deferred to dispatch, and it is not reviewer-waivable."""
-        admitted = self._admit_views(active_view_refs, effect_capable=effect_capable)
+        audience = self.core.get_record(audience_ref.id, audience_ref.revision)
+        intent = self.core.get_record(intent_ref.id, intent_ref.revision)
+        admitted = self._admit_views(
+            active_view_refs,
+            effect_capable=effect_capable,
+            audience=audience if isinstance(audience, AudienceSnapshot) else None,
+            intent=intent if isinstance(intent, Intent) else None,
+        )
         episode, used_bytes = (
             self.eligible_episode_fragments(episode_ref) if episode_ref else ((), 0)
         )
-        audience = self.core.get_record(audience_ref.id, audience_ref.revision)
         memories = (
             self._eligible_memory_fragments(audience.destination_id, MAX_CONTEXT_BYTES - used_bytes)
             if isinstance(audience, AudienceSnapshot)
@@ -1159,12 +1184,22 @@ class ContextMemory:
         return snapshot
 
     def _admit_views(
-        self, active_view_refs: tuple[RecordRef, ...], *, effect_capable: bool
+        self,
+        active_view_refs: tuple[RecordRef, ...],
+        *,
+        effect_capable: bool,
+        audience: AudienceSnapshot | None,
+        intent: Intent | None,
     ) -> tuple[MemoryView, ...]:
-        """Load and structurally admit the requested views. A missing view,
-        a non-current citation, or a non-ACTIVE status fails admission with
-        STALE_CONTEXT; an internal-only view fails against an externally
-        effect-capable snapshot with VIEW_FORBIDDEN (task 3.3)."""
+        """Load and structurally admit the requested views into THIS
+        context. Failures: a missing view, a non-current citation, a
+        non-ACTIVE status, or an expired valid_until → STALE_CONTEXT; an
+        internal-only view against an externally effect-capable snapshot,
+        an audience the view's bounds do not cover, or an intent whose
+        purpose class the granting authorizations no longer cover →
+        VIEW_FORBIDDEN (task 3.3 + imi feedback: a view is bound to the
+        context it was granted for — it cannot be carried into another
+        room, a DM, or a different purpose because its bytes exist)."""
         admitted: list[MemoryView] = []
         for view_ref in active_view_refs:
             record = self.core.get_record(view_ref.id, view_ref.revision)
@@ -1182,6 +1217,11 @@ class ContextMemory:
                 raise ViewAdmissionError(
                     ReasonCode.STALE_CONTEXT, f"view {view_ref.id} is not active"
                 )
+            now = self.clock.now_rfc3339()
+            if record.valid_until is not None and record.valid_until < now:
+                raise ViewAdmissionError(
+                    ReasonCode.STALE_CONTEXT, f"view {view_ref.id} has expired"
+                )
             if effect_capable and all(
                 use == IntendedUse.INTERNAL_ONLY for use in record.permitted_uses
             ):
@@ -1190,6 +1230,23 @@ class ContextMemory:
                     f"strongly internal-only view {view_ref.id} cannot enter an"
                     " externally effect-capable snapshot (including a DM)",
                 )
+            if audience is not None and audience.destination_id not in record.audience_bounds:
+                raise ViewAdmissionError(
+                    ReasonCode.VIEW_FORBIDDEN,
+                    f"view {view_ref.id} is not valid for audience {audience.destination_id}",
+                )
+            if intent is not None and record.authorization_refs:
+                for auth_ref in record.authorization_refs:
+                    authorization = self.core.get_record(auth_ref.id, auth_ref.revision)
+                    if isinstance(authorization, UseAuthorization) and (
+                        intent.purpose_class not in authorization.permitted_purpose_classes
+                    ):
+                        raise ViewAdmissionError(
+                            ReasonCode.VIEW_FORBIDDEN,
+                            f"view {view_ref.id} was granted for purpose class"
+                            f" {authorization.permitted_purpose_classes}; the"
+                            f" entering intent is {intent.purpose_class!r}",
+                        )
             admitted.append(record)
         return tuple(admitted)
 

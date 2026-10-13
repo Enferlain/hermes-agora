@@ -722,3 +722,138 @@ def test_invalidation_revisions_stamp_correction_time(tmp_path: Path) -> None:
     assert isinstance(flipped, Derivation)
     assert flipped.state == DerivationState.STALE
     assert flipped.created_at != ANCHOR  # the invalidation time is recorded
+
+
+def _derive(
+    core: CoreStore,
+    derivation_id: str,
+    source_fragment_id: str,
+    text: str,
+) -> str:
+    """A derivation whose output fragment is retained as a memory."""
+    from agora.contracts import DependencyKind, Derivation, DerivationState, ProducerKind
+
+    output_fragment_id = f"fragment:memory:{derivation_id}"
+    core.put_payload(f"payload:{output_fragment_id}", text, owner_ref=derivation_id)
+    core.put_record(
+        ContentFragment(
+            id=output_fragment_id,
+            revision=1,
+            created_at=ANCHOR,
+            kind=FragmentKind.TEXT,
+            payload_ref=f"payload:{output_fragment_id}",
+            provenance=_plain_provenance_for("principal:agent"),
+            commitment_refs=(),
+            eligibility_status=EligibilityStatus.ACTIVE,
+        )
+    )
+    core.put_record(
+        ProducerCoverage(
+            id=f"coverage:{derivation_id}",
+            revision=1,
+            created_at=ANCHOR,
+            producer_kind=ProducerKind.SUMMARY,
+            input_fragment_refs=(RecordRef(id=source_fragment_id, revision=1),),
+            input_view_refs=(),
+            input_intent_refs=(),
+            input_policy_refs=(),
+            sink_ref=None,
+            call_id=derivation_id,
+            runtime_epoch=core.runtime_epoch,
+        )
+    )
+    core.put_record(
+        Derivation(
+            id=derivation_id,
+            revision=1,
+            created_at=ANCHOR,
+            output_fragment_ref=RecordRef(id=output_fragment_id, revision=1),
+            producer_coverage_ref=RecordRef(id=f"coverage:{derivation_id}", revision=1),
+            claimed_parent_refs=(RecordRef(id=source_fragment_id, revision=1),),
+            transform_id=None,
+            authorization_refs=(),
+            inherited_commitment_refs=(),
+            input_version_vector=(RecordRef(id=source_fragment_id, revision=1),),
+            state=DerivationState.CURRENT,
+        )
+    )
+    core.add_dependency(
+        RecordRef(id=derivation_id, revision=1),
+        RecordRef(id=source_fragment_id, revision=1),
+        DependencyKind.PRODUCER_INPUT,
+    )
+    # retain the derivation's OWN output fragment as a scoped memory
+    core.promote_memory(
+        MemoryRecord(
+            id=f"memory:{derivation_id}",
+            revision=1,
+            created_at=ANCHOR,
+            assertion_fragment_ref=RecordRef(id=output_fragment_id, revision=1),
+            stage=MemoryStage.CANDIDATE,
+            scope_kind=ScopeKind.ROOM,
+            scope_ref="room:a",
+            custodian_refs=(),
+            subject_refs=(),
+            commitment_refs=(),
+            assertion_status=AssertionStatus.OBSERVED_STATEMENT,
+            supersedes_ref=None,
+            valid_until=None,
+            status=MemoryStatus.ACTIVE,
+        ),
+        expiry_ms=EXPIRY_MS,
+    )
+    return output_fragment_id
+
+
+def test_correction_invalidates_transitively(tmp_path: Path) -> None:
+    """source -> summary A -> summary B -> snapshot propagates all the way
+    down (imi feedback on task 3), not one level."""
+    from agora.contracts import ContextSnapshot, Derivation, DerivationState
+    from agora.ports import VirtualClock
+    from agora.stores import CoreStore as Store
+
+    core = Store(tmp_path / "core.sqlite")
+    context = ContextMemory(core, VirtualClock(ANCHOR, start_ms=900_000))
+    seed_memory(core, "memory:src")
+    summary_a_fragment = _derive(core, "derivation:a", "fragment:memory:memory:src", "summary A")
+    summary_b_fragment = _derive(core, "derivation:b", summary_a_fragment, "summary B of A")
+    _snapshot_prereqs(core)
+    from agora.contracts import ConversationEpisode
+
+    core.put_record(
+        ConversationEpisode(
+            id="episode:chain",
+            revision=1,
+            created_at=ANCHOR,
+            container_id="room:a",
+            member_event_refs=(),
+            reply_edges=(),
+            topic_refs=(),
+            summary_ref=None,
+            episode_revision=1,
+            pending_intent_refs=(),
+        )
+    )
+    snapshot = context.build_snapshot(
+        identity_ref=RecordRef(id="identity:agent", revision=1),
+        intent_ref=RecordRef(id="intent:1", revision=1),
+        audience_ref=_audience_for(core, "room:a"),
+        episode_ref=RecordRef(id="episode:chain", revision=1),
+        sink_ref=RecordRef(id="sink:scripted", revision=1),
+        effect_capable=False,
+        call_id="snap:chain",
+    )
+    assert summary_b_fragment in [ref.id for ref in snapshot.selected_fragment_refs]
+
+    context.correct_memory(RecordRef(id="memory:src", revision=1), "corrected source")
+    derivation_a = core.get_record("derivation:a")
+    derivation_b = core.get_record("derivation:b")
+    assert isinstance(derivation_a, Derivation) and derivation_a.state == DerivationState.STALE
+    assert isinstance(derivation_b, Derivation) and derivation_b.state == DerivationState.STALE
+    for memory_id in ("memory:derivation:a", "memory:derivation:b"):
+        memory = core.get_record(memory_id)
+        assert isinstance(memory, MemoryRecord)
+        assert memory.status == MemoryStatus.STALE
+    invalidated = core.get_record(snapshot.id)
+    assert isinstance(invalidated, ContextSnapshot)
+    assert invalidated.status.value == "INVALID"
