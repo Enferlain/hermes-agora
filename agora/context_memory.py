@@ -33,6 +33,7 @@ from agora.contracts import (
     AuthorityBinding,
     AuthorityDomain,
     Commitment,
+    CommitmentStrength,
     ContentFragment,
     ContextSnapshot,
     DependencyKind,
@@ -64,6 +65,7 @@ from agora.contracts import (
     RequestedPrecision,
     ResourceOperation,
     ResourcePolicy,
+    RuntimeOrigin,
     ScopeKind,
     SnapshotStatus,
     SourceKind,
@@ -893,6 +895,159 @@ class ContextMemory:
         return row["n"] if row is not None else 0
 
     # -- staged promotion and corrections (M2 task 3.2, §6.3) ---------------
+
+    def propose_memory(
+        self,
+        *,
+        assertion_text: str,
+        source_refs: tuple[RecordRef, ...],
+        requested_stage: MemoryStage,
+        requested_scope_kind: ScopeKind,
+        scope_ref: str,
+        existing_memory_ref: RecordRef | None,
+        runtime_origin: RuntimeOrigin,
+    ) -> RecordRef:
+        """Explicit PROPOSE_MEMORY (handoff §5, §6.4): retain an ordinary
+        observation as a scoped memory, or promote an existing one. The
+        runtime origin is coordinator-minted — the model never sets it — and
+        lineage is verified against that origin's producer coverage: the
+        model may only cite fragments the runtime actually supplied, so a
+        forged or declared-parent-omitted citation is a typed
+        INVALID_REFERENCE, never a silent write. Storage inherits every
+        source commitment (a request cannot discharge commitments) and is
+        refused when a STRONG commitment forbids internal use. Scope is
+        never widened: BROAD needs a curated scope-change permission that
+        does not exist in this slice, DURABLE needs an existing CANDIDATE,
+        and promotions carry the existing scope unchanged."""
+        if existing_memory_ref is not None:
+            memory = self._current_memory_or_error(existing_memory_ref)
+            if (requested_scope_kind, scope_ref) != (memory.scope_kind, memory.scope_ref):
+                raise MemoryStateError(
+                    ReasonCode.POLICY_FORBIDDEN,
+                    "promotion cannot move scope; broad promotion needs a curated permission",
+                )
+            return self.stage_memory(existing_memory_ref, requested_stage)
+        if requested_stage is MemoryStage.DURABLE:
+            raise MemoryStateError(
+                ReasonCode.POLICY_FORBIDDEN,
+                "DURABLE requires an existing CANDIDATE memory and an explicit proposal",
+            )
+        if requested_scope_kind is ScopeKind.BROAD:
+            raise MemoryStateError(
+                ReasonCode.POLICY_FORBIDDEN,
+                "BROAD scope requires an explicit curated scope-change permission",
+            )
+        supplied = self._runtime_supplied_refs(runtime_origin)
+        for ref in source_refs:
+            if ref not in supplied:
+                raise MemoryStateError(
+                    ReasonCode.INVALID_REFERENCE,
+                    f"source {ref.id} was not supplied by the runtime context",
+                )
+        inherited: dict[str, RecordRef] = {}
+        for ref in sorted(source_refs, key=lambda r: r.id):
+            fragment = self.core.get_record(ref.id, ref.revision)
+            assert isinstance(fragment, ContentFragment)
+            for commitment_ref in fragment.commitment_refs:
+                inherited[commitment_ref.id] = commitment_ref
+        for commitment_ref in sorted(inherited.values(), key=lambda r: r.id):
+            commitment = self.core.get_record(commitment_ref.id, commitment_ref.revision)
+            if (
+                isinstance(commitment, Commitment)
+                and commitment.strength == CommitmentStrength.STRONG
+                and not commitment.internal_use_allowed
+            ):
+                raise MemoryStateError(
+                    ReasonCode.POLICY_FORBIDDEN,
+                    f"source {commitment_ref.id} forbids internal use; no storage policy matches",
+                )
+        now = self.clock.now_rfc3339()
+        memory_id = (
+            "memory:propose:"
+            + hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "assertion": assertion_text,
+                        "sources": [ref.to_payload() for ref in source_refs],
+                        "stage": requested_stage.value,
+                        "scope": [requested_scope_kind.value, scope_ref],
+                    }
+                )
+            ).hexdigest()[:24]
+        )
+        existing = self.core.current_ref(memory_id)
+        if existing is not None:
+            # Crash replay re-proposes byte-identical content: the stored
+            # revision is the answer, never a duplicate.
+            return existing
+        fragment_id = f"fragment:{memory_id}"
+        self.core.put_payload(f"payload:{fragment_id}", assertion_text, owner_ref=memory_id)
+        fragment = ContentFragment(
+            id=fragment_id,
+            revision=1,
+            created_at=now,
+            kind=FragmentKind.TEXT,
+            payload_ref=f"payload:{fragment_id}",
+            provenance=Provenance(
+                producer_ref=runtime_origin.actor_ref,
+                source_kind=SourceKind.MEMORY,
+                origin_event_ref=None,
+                claimed_speaker_ref=None,
+                instruction_authority=InstructionAuthority.AGENT_STATE,
+                integrity=Integrity.DERIVED,
+                custodian_refs=(),
+                subject_refs=(),
+                original_audience_ref=None,
+                assertion_status=AssertionStatus.AGENT_ADOPTED_PREFERENCE,
+                producer_coverage_ref=runtime_origin.producer_coverage_ref,
+                model_claimed_parent_refs=tuple(source_refs),
+                occurred_at=now,
+                observed_at=now,
+            ),
+            commitment_refs=tuple(sorted(inherited.values(), key=lambda r: r.id)),
+            eligibility_status=EligibilityStatus.ACTIVE,
+        )
+        memory = MemoryRecord(
+            id=memory_id,
+            revision=1,
+            created_at=now,
+            assertion_fragment_ref=RecordRef(id=fragment.id, revision=fragment.revision),
+            stage=requested_stage,
+            scope_kind=requested_scope_kind,
+            scope_ref=scope_ref,
+            custodian_refs=(),
+            subject_refs=(),
+            commitment_refs=tuple(sorted(inherited.values(), key=lambda r: r.id)),
+            assertion_status=AssertionStatus.AGENT_ADOPTED_PREFERENCE,
+            supersedes_ref=None,
+            valid_until=None,
+            status=MemoryStatus.ACTIVE,
+        )
+        self.core.put_record(fragment)
+        self.core.promote_memory(memory, expiry_ms=None)
+        return RecordRef(id=memory.id, revision=memory.revision)
+
+    def _runtime_supplied_refs(self, runtime_origin: RuntimeOrigin) -> frozenset[RecordRef]:
+        """The fragment refs the runtime actually put in front of the model:
+        the producer coverage's input fragments plus every fragment an input
+        view returned. Nothing else is citable lineage."""
+        if runtime_origin.producer_coverage_ref is None:
+            raise MemoryStateError(
+                ReasonCode.INVALID_REFERENCE, "runtime origin carries no producer coverage"
+            )
+        coverage = self.core.get_record(
+            runtime_origin.producer_coverage_ref.id, runtime_origin.producer_coverage_ref.revision
+        )
+        if not isinstance(coverage, ProducerCoverage):
+            raise MemoryStateError(
+                ReasonCode.INVALID_REFERENCE, "runtime origin cites a missing producer coverage"
+            )
+        supplied = set(coverage.input_fragment_refs)
+        for view_ref in coverage.input_view_refs:
+            view = self.core.get_record(view_ref.id, view_ref.revision)
+            if isinstance(view, MemoryView):
+                supplied.update(view.returned_fragment_refs)
+        return frozenset(supplied)
 
     def stage_memory(self, memory_ref: RecordRef, target_stage: MemoryStage) -> RecordRef:
         """Explicit staged promotion: EPHEMERAL → SOCIAL/CANDIDATE → DURABLE,

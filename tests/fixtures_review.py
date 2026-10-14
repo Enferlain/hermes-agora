@@ -384,10 +384,13 @@ def feed_event(
     seq: int = 1,
     *,
     fragment_id: str | None = None,
+    episode_id: str = "episode:room:public",
 ) -> None:
     """Ingest one journal event: an ordinary text fragment by default, or
     an existing seeded fragment (e.g. the restricted finance resource) by
-    id — its commitments then travel through runtime producer coverage."""
+    id — its commitments then travel through runtime producer coverage.
+    Works are grouped under ``episode_id`` (a ConversationEpisode record is
+    created if missing) so turns see the episode's fragments in context."""
     if fragment_id is None:
         fragment_id = f"fragment:evt:{seq}"
         payload_id = f"payload:evt:{seq}"
@@ -404,6 +407,23 @@ def feed_event(
                 eligibility_status=EligibilityStatus.ACTIVE,
             )
         )
+    if stack.core.get_record(episode_id) is None:
+        from agora.contracts import ConversationEpisode
+
+        stack.core.put_record(
+            ConversationEpisode(
+                id=episode_id,
+                revision=1,
+                created_at=stack.clock.now_rfc3339(),
+                container_id="room:public",
+                member_event_refs=(),
+                reply_edges=(),
+                topic_refs=(),
+                summary_ref=None,
+                episode_revision=1,
+                pending_intent_refs=(),
+            )
+        )
     stack.transport.append_events(
         (
             JournalEntry(
@@ -417,7 +437,26 @@ def feed_event(
             ),
         )
     )
-    stack.coordinator.ingest(stack.transport, consumer_id="core-1")
+    stack.coordinator.ingest(
+        stack.transport, consumer_id="core-1", planner=_episode_planner(episode_id)
+    )
+
+
+def _episode_planner(episode_id: str) -> Any:
+    from agora.stores import WorkSeed, default_work_planner
+
+    def plan(entry: JournalEntry) -> WorkSeed | None:
+        seed = default_work_planner(entry)
+        if seed is None:
+            return None
+        return WorkSeed(
+            work_id=seed.work_id,
+            trigger_key=seed.trigger_key,
+            intent_ref=seed.intent_ref,
+            episode_ref=episode_id,
+        )
+
+    return plan
 
 
 def _provenance(stack: ReviewStack) -> Provenance:

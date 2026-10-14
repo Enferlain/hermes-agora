@@ -24,6 +24,6 @@
 
 ## 5. Stories and closure
 
-- [ ] 5.1 Coordinator integration: REQUEST_ACCESS and PROPOSE_MEMORY steps wired to the new evaluation/memory paths with runtime-origin binding. Verify: handoff story 2 (affordability probe) runs end-to-end with constrained-view, revise/joke/quiet paths.
+- [x] 5.1 Coordinator integration: REQUEST_ACCESS and PROPOSE_MEMORY steps wired to the new evaluation/memory paths with runtime-origin binding. Verify: handoff story 2 (affordability probe) runs end-to-end with constrained-view, revise/joke/quiet paths.
 - [ ] 5.2 Adversarial battery: paired-world fixtures, forged lineage/declared-parent omission, public-only regeneration, private→public context switch, and social-positive cases (legitimate cross-context recall; an always-silent implementation fails). Verify: all pass deterministically.
 - [ ] 5.3 Closure: full gates green, CHANGELOG entry, review-agent pass with findings addressed, `bd close` hermes-agora-2xl.1 with M2 exit evidence per ROADMAP.

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from agora.commit_gate import CommitGate, GateContext
-from agora.context_memory import ContextMemory
+from agora.context_memory import ContextMemory, MemoryStateError
 from agora.contracts import (
     REF_TARGETS,
     AgentIdentity,
@@ -38,11 +38,17 @@ from agora.contracts import (
     HistoryVisibility,
     InstructionAuthority,
     Integrity,
+    IntendedUse,
     Intent,
     IntentState,
     MainStepKind,
+    MemoryAccessRequest,
+    MemoryAccessResult,
+    MemoryView,
     ModelCreateIntentStep,
     ModelFinishStep,
+    ModelProposeMemoryStep,
+    ModelRequestAccessStep,
     ModelSubmitPlanStep,
     OutcomeKind,
     Principal,
@@ -51,6 +57,8 @@ from agora.contracts import (
     ReasonCode,
     RecordRef,
     RecordStatus,
+    RequestedPrecision,
+    RuntimeOrigin,
     SinkKind,
     SinkStatus,
     SourceKind,
@@ -218,13 +226,20 @@ class Coordinator:
 
     # -- turn execution ------------------------------------------------------
 
-    def ingest(self, transport: TransportStore, *, consumer_id: str) -> IngestReceipt:
+    def ingest(
+        self,
+        transport: TransportStore,
+        *,
+        consumer_id: str,
+        planner: Any = None,
+    ) -> IngestReceipt:
         receipt = ingest_batch(
             self.core,
             transport,
             consumer_id=consumer_id,
             ingested_at=self.clock.now_rfc3339(),
             injector=self.injector,
+            planner=planner,
         )
         return receipt
 
@@ -254,6 +269,13 @@ class Coordinator:
         receipt_ref: RecordRef | None = None
         outcome_kind: OutcomeKind | None = None
         reason_codes: list[ReasonCode] = []
+        # Turn-held state (M2 5.1): views granted to this turn and still
+        # usable, and typed notices the next model step sees in its envelope.
+        held_view_refs: list[RecordRef] = []
+        notices: list[str] = []
+        episode_ref = None
+        if work["episode_ref"] is not None:
+            episode_ref = self.core.current_ref(work["episode_ref"])
         effect_refs: list[RecordRef] = []
 
         try:
@@ -269,19 +291,29 @@ class Coordinator:
                     identity_ref=RecordRef(id=self.identity.id, revision=self.identity.revision),
                     intent_ref=chosen_intent,
                     audience_ref=RecordRef(id=self.audience.id, revision=self.audience.revision),
-                    episode_ref=None,
+                    episode_ref=episode_ref,
                     sink_ref=self.sink_ref,
                     effect_capable=True,
                     call_id=call_id,
+                    active_view_refs=tuple(held_view_refs),
                 )
+                messages = [{"role": "user", "content": _context_summary(snapshot)}]
+                messages.extend({"role": "user", "content": notice} for notice in notices)
                 envelope = self.context_memory.record_envelope(
                     snapshot=snapshot,
                     purpose=EnvelopePurpose.MAIN_STEP,
-                    messages=[{"role": "user", "content": _context_summary(snapshot)}],
+                    messages=messages,
                     sink_ref=self.sink_ref,
                     call_id=call_id,
                 )
-                step = self.main_port.step(envelope)
+                try:
+                    step = self.main_port.step(envelope)
+                except RuntimeError:
+                    # The port offers no further step (scripted exhaustion):
+                    # silence is never inferred from a missing model (§6.4),
+                    # so the standing outcome — a hold, if one stands — is
+                    # the terminal state, not a fresh budget failure.
+                    break
                 if self.injector is not None:
                     self.injector.trip(CrashCheckpoint.AFTER_MODEL_BEFORE_ACCEPT)
 
@@ -303,17 +335,22 @@ class Coordinator:
                         decision, receipt_ref, refs = self._defer(work_id, chosen_intent)
                         effect_refs.extend(refs)
                         outcome_kind = OutcomeKind.DEFERRED
+                        reason_codes = []
                     else:
+                        # An explicit stand-down after a held submission is
+                        # normal silence: NO_ACTION, with the held decision
+                        # left on record (the hold never auto-resolves).
                         outcome_kind = OutcomeKind.NO_ACTION
-                        reason_codes.append(ReasonCode.NO_ACTION)
+                        reason_codes = []
                     break
                 if step.kind == MainStepKind.SUBMIT_PLAN:
                     work_row = self.core.get_work(work_id)
                     assert work_row is not None
                     submissions = work_row["submissions_used"]
                     if submissions >= self.config.max_plan_submissions:
-                        outcome_kind = OutcomeKind.FAILED_INTERNAL
-                        reason_codes.append(ReasonCode.BUDGET_EXHAUSTED)
+                        if outcome_kind is None:
+                            outcome_kind = OutcomeKind.FAILED_INTERNAL
+                            reason_codes.append(ReasonCode.BUDGET_EXHAUSTED)
                         break
                     assert isinstance(step, ModelSubmitPlanStep)
                     decision, receipt_ref, refs = self._submit_plan(
@@ -322,25 +359,51 @@ class Coordinator:
                     effect_refs.extend(refs)
                     if decision.kind == DecisionKind.AUTHORIZED and receipt_ref is not None:
                         outcome_kind = OutcomeKind.COMMITTED
-                    elif decision.kind == DecisionKind.DENIED:
+                        reason_codes = []
+                    elif decision.kind in (DecisionKind.DENIED, DecisionKind.HOLD):
+                        # The turn holds, but the model may still offer a
+                        # replacement within the submissions budget (§6.1
+                        # bounded rewrite loop; never an automatic spin). A
+                        # held required review stays local in the meantime:
+                        # no dispatch, no fallback (I07/I13), and a rewrite
+                        # is a fresh proposal revision.
                         outcome_kind = OutcomeKind.HELD
-                        reason_codes.extend(decision.reason_codes)
-                    elif decision.kind == DecisionKind.HOLD:
-                        # A held required review stays local: no dispatch, no
-                        # fallback (I07/I13); resubmission is a fresh revision.
-                        outcome_kind = OutcomeKind.HELD
-                        reason_codes.extend(decision.reason_codes)
+                        reason_codes = list(decision.reason_codes)
+                        notices.append(
+                            "held:" + ",".join(code.value for code in decision.reason_codes)
+                        )
                     elif decision.kind == DecisionKind.QUIET_COMPLETED:
                         outcome_kind = OutcomeKind.NO_ACTION
-                    break
-                if isinstance(step, ModelCreateIntentStep):
+                        reason_codes = []
+                    if outcome_kind in (OutcomeKind.COMMITTED, OutcomeKind.NO_ACTION):
+                        break
+                elif isinstance(step, ModelRequestAccessStep):
+                    result = self._request_access(step, chosen_intent, snapshot, work_id, call_id)
+                    notices.append(_access_notice(result))
+                    if result.view_ref is not None:
+                        view = self.core.get_record(result.view_ref.id, result.view_ref.revision)
+                        if isinstance(view, MemoryView) and _OUTWARD_USES.intersection(
+                            view.permitted_uses
+                        ):
+                            # Only outward-usable views are ever offered to a
+                            # later snapshot: an internal-only view is never
+                            # admissible to effect-capable context (M2 3.3),
+                            # so it informs the turn as a typed notice only.
+                            held_view_refs.append(result.view_ref)
+                    continue
+                elif isinstance(step, ModelProposeMemoryStep):
+                    memory_ref = self._propose_memory(step, snapshot, work_id)
+                    notices.append(f"memory:{memory_ref.id}:stored")
+                    continue
+                elif isinstance(step, ModelCreateIntentStep):
                     chosen_intent = self._create_intent(step.goal_text, step.purpose_class)
                     continue
                 # PARTICIPATE / others: record and continue the loop.
                 continue
             else:
-                outcome_kind = OutcomeKind.FAILED_INTERNAL
-                reason_codes.append(ReasonCode.BUDGET_EXHAUSTED)
+                if outcome_kind is None:
+                    outcome_kind = OutcomeKind.FAILED_INTERNAL
+                    reason_codes.append(ReasonCode.BUDGET_EXHAUSTED)
         except BudgetExhausted:
             outcome_kind = OutcomeKind.FAILED_INTERNAL
             reason_codes.append(ReasonCode.BUDGET_EXHAUSTED)
@@ -374,7 +437,8 @@ class Coordinator:
         self.core.put_record(outcome)
         with self.core.transaction() as connection:
             connection.execute(
-                "UPDATE core_work SET terminal_outcome_ref = ?, state = ? WHERE work_id = ?",
+                "UPDATE core_work SET terminal_outcome_ref = ?, state = ?,"
+                " lease_owner = NULL, lease_until_ms = NULL WHERE work_id = ?",
                 (outcome.id, WorkState.COMPLETED.value, work_id),
             )
         audit_code = _audit_code(outcome)
@@ -440,7 +504,7 @@ class Coordinator:
                 owner_ref=f"work:{work_id}",
             )
             effect = Effect(
-                id=f"{work_id}:effect:{index}",
+                id=f"{work_id}:effect:{proposal_revision}:{index}",
                 revision=1,
                 created_at=self.clock.now_rfc3339(),
                 logical_effect_id=f"{work_id}:effect:{index}",
@@ -528,6 +592,131 @@ class Coordinator:
                 self.core.verify_reference(ref, allowed, label="model step")
             except InvalidReferenceError as error:
                 raise PlanRejected(ReasonCode.INVALID_REFERENCE, str(error)) from error
+
+    def _request_access(
+        self,
+        step: ModelRequestAccessStep,
+        intent_ref: RecordRef,
+        snapshot: ContextSnapshot,
+        work_id: str,
+        call_id: str,
+    ) -> MemoryAccessResult:
+        """Bind a model access request to the authenticated runtime (handoff
+        §5): intent, audience, and runtime origin are runtime-supplied — the
+        model selects only resource, precision, use, and necessity. Malformed
+        payloads and bad references are typed rejections, never crashes, and
+        no field the model supplies can widen the request's bindings."""
+        request = step.request
+        model_id = request.get("request_id")
+        if not isinstance(model_id, str) or not model_id:
+            model_id = "access"
+        resource_id = request.get("resource_id")
+        if resource_id is not None and not isinstance(
+            self.core.get_record(resource_id), ContentFragment
+        ):
+            raise PlanRejected(
+                ReasonCode.INVALID_REFERENCE, f"resource {resource_id!r} does not resolve"
+            )
+        data_class = request.get("data_class")
+        if (resource_id is None) == (data_class is None):
+            raise PlanRejected(
+                ReasonCode.INVALID_SCHEMA,
+                "exactly one of resource_id or data_class is required",
+            )
+        audience_payload = request.get("audience_ref")
+        if audience_payload is not None:
+            parsed = _parse_ref(audience_payload)
+            if parsed is None or parsed.id != self.audience.id:
+                raise PlanRejected(
+                    ReasonCode.CONTEXT_MISMATCH,
+                    "an access request is bound to the turn's audience",
+                )
+        trigger_refs: list[RecordRef] = []
+        for payload in request.get("trigger_refs", ()):
+            ref = _parse_ref(payload)
+            if ref is None:
+                raise PlanRejected(ReasonCode.INVALID_REFERENCE, "malformed trigger ref")
+            try:
+                self.core.verify_reference(
+                    ref, REF_TARGETS[MemoryAccessRequest]["trigger_refs"], label="model step"
+                )
+            except InvalidReferenceError as error:
+                raise PlanRejected(ReasonCode.INVALID_REFERENCE, str(error)) from error
+            trigger_refs.append(ref)
+        try:
+            intended_use = IntendedUse(request["intended_use"])
+            precision = RequestedPrecision(request["requested_precision"])
+        except (KeyError, ValueError) as error:
+            raise PlanRejected(
+                ReasonCode.INVALID_SCHEMA, f"malformed access request: {error}"
+            ) from error
+        requested_fields = request.get("requested_fields", ())
+        if not isinstance(requested_fields, (list, tuple)) or not all(
+            isinstance(field, str) for field in requested_fields
+        ):
+            raise PlanRejected(ReasonCode.INVALID_SCHEMA, "requested_fields must be strings")
+        transform_id = request.get("transform_id")
+        if transform_id is not None and not isinstance(transform_id, str):
+            raise PlanRejected(ReasonCode.INVALID_SCHEMA, "transform_id must be a string")
+        necessity_text = request.get("necessity_text")
+        if necessity_text is not None and not isinstance(necessity_text, str):
+            raise PlanRejected(ReasonCode.INVALID_SCHEMA, "necessity_text must be a string")
+        bound = MemoryAccessRequest(
+            id=f"access:{call_id}:{model_id}",
+            revision=1,
+            created_at=self.clock.now_rfc3339(),
+            request_id=f"{call_id}:{model_id}",
+            intent_ref=intent_ref,
+            resource_id=resource_id,
+            data_class=data_class,
+            requested_precision=precision,
+            requested_fields=tuple(requested_fields),
+            transform_id=transform_id,
+            audience_ref=RecordRef(id=self.audience.id, revision=self.audience.revision),
+            intended_use=intended_use,
+            necessity_text=necessity_text,
+            necessity_payload_ref=None,
+            trigger_refs=tuple(trigger_refs),
+            runtime_origin=self._runtime_origin(snapshot, work_id),
+        )
+        return self.context_memory.request_access(bound)
+
+    def _propose_memory(
+        self, step: ModelProposeMemoryStep, snapshot: ContextSnapshot, work_id: str
+    ) -> RecordRef:
+        """PROPOSE_MEMORY with runtime-origin binding: lineage verification
+        against the turn's actual coverage happens in ContextMemory; a typed
+        memory-state failure (forged lineage, scope widening, skipped stage)
+        rejects the turn, never a partial write."""
+        try:
+            return self.context_memory.propose_memory(
+                assertion_text=step.assertion_text,
+                source_refs=tuple(step.source_refs),
+                requested_stage=step.requested_stage,
+                requested_scope_kind=step.requested_scope_kind,
+                scope_ref=step.scope_ref,
+                existing_memory_ref=step.existing_memory_ref,
+                runtime_origin=self._runtime_origin(snapshot, work_id),
+            )
+        except MemoryStateError as error:
+            raise PlanRejected(error.code, str(error)) from error
+
+    def _runtime_origin(self, snapshot: ContextSnapshot, work_id: str) -> RuntimeOrigin:
+        """The coordinator-minted origin every memory-bound record carries:
+        actor, work, snapshot, coverage, and epoch — none of it model-set."""
+        return RuntimeOrigin(
+            actor_ref=RecordRef(
+                id=self.identity.principal_ref.id, revision=self.identity.principal_ref.revision
+            ),
+            work_ref=RecordRef(id=work_id, revision=1),
+            snapshot_ref=RecordRef(id=snapshot.id, revision=snapshot.revision),
+            trigger_event_refs=(),
+            producer_coverage_ref=RecordRef(
+                id=snapshot.producer_coverage_ref.id,
+                revision=snapshot.producer_coverage_ref.revision,
+            ),
+            runtime_epoch=self.core.runtime_epoch,
+        )
 
     def _render(self, draft: Any) -> dict[str, Any]:
         if draft.kind == EffectKind.SEND_MESSAGE:
@@ -712,3 +901,28 @@ def _json_dumps(value: Any) -> str:
 
 def _context_summary(snapshot: ContextSnapshot) -> str:
     return f"snapshot:{snapshot.id}:fragments:{len(snapshot.selected_fragment_refs)}"
+
+
+#: Permitted uses that can justify a view in effect-capable context;
+#: INTERNAL_ONLY views stay out of snapshots entirely (M2 3.3).
+_OUTWARD_USES = frozenset({IntendedUse.EXPRESSION, IntendedUse.OBSERVABLE_INFLUENCE})
+
+
+def _access_notice(result: MemoryAccessResult) -> str:
+    """The typed access outcome the model sees in its next envelope: status,
+    view id, permitted uses, reason codes — never payload bytes (an
+    internal-only view informs the turn as this summary alone)."""
+    view_id = result.view_ref.id if result.view_ref is not None else "-"
+    uses = ",".join(use.value for use in result.permitted_uses) or "-"
+    codes = ",".join(code.value for code in result.reason_codes) or "-"
+    return f"access:{result.access_status.value}:view:{view_id}:uses:{uses}:codes:{codes}"
+
+
+def _parse_ref(payload: Any) -> RecordRef | None:
+    if isinstance(payload, RecordRef):
+        return payload
+    if isinstance(payload, dict) and isinstance(payload.get("id"), str):
+        revision = payload.get("revision", 1)
+        if isinstance(revision, int) and revision >= 1:
+            return RecordRef(id=payload["id"], revision=revision)
+    return None
