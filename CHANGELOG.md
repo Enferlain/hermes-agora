@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), with the change of using daily dated entries instead of releases.
 
+## 2026-10-14
+
+### Added
+
+- §8 review routing and the REQUIRED protocol (M2 tasks 4.1/4.2): `CommitGate` routes every plan after code checks — REQUIRED when an active STRONG commitment restricting expression or observable influence is reachable from the snapshot, the plan's runtime producer coverage, or the derived intent (QUIET/DEFER resolutions included, so the resolution itself is reviewed); ADVISORY for fixture-configured ordinary concerns on ACT plans; NONE otherwise. Sensor scores have no path into routing. REQUIRED builds the closed `ReviewEnvelope` (exact proposal digest, immutable policy/commitment refs, authorized comparison views, bounded quotes, exact messages out-of-line), persists the `ReviewRequirement`, waits on the `ReviewerPort`, and binds the assessment to the digest, routing-time versions, and snapshot revision; after the wait the gate rechecks those versions — any drift voids the pass (POLICY_CHANGED). Reviewer absence/failure/timeout, CONCERNS, INSUFFICIENT_CONTEXT, missing comparison views, and non-fact runtime coverage all HOLD; there is no downgrade on resubmission (a rewrite is a fresh proposal_revision with its own assessment record). A `ScriptedReviewer` port makes reviewer behavior deterministic and crash-replay-identical, and held required reviews stay local in the coordinator — no dispatch, no fallback.
+
 ## 2026-10-13
 
 ### Added

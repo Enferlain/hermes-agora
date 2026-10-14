@@ -19,8 +19,8 @@
 
 ## 4. Review routing and protocol
 
-- [ ] 4.1 §8 routing table in CommitGate: HARD_DENY conditions, REQUIRED on active STRONG expression/observable-use resolution (QUIET/DEFER included, runtime coverage closure), fixture-configured ADVISORY, NONE otherwise; sensor scores never create REQUIRED. Verify: ordinary-speech NONE, strong-restriction REQUIRED, declined-advisory scenarios pass.
-- [ ] 4.2 REQUIRED protocol: closed ReviewEnvelope construction, scripted ReviewerPort flow, PASS bound to digests/versions, version-recheck after model wait, HOLD on CONCERNS/INSUFFICIENT_CONTEXT/missing facts/timeout, no downgrade on resubmission. Verify: version-change-voids-pass and facts-missing-hold scenarios pass.
+- [x] 4.1 §8 routing table in CommitGate: HARD_DENY conditions, REQUIRED on active STRONG expression/observable-use resolution (QUIET/DEFER included, runtime coverage closure), fixture-configured ADVISORY, NONE otherwise; sensor scores never create REQUIRED. Verify: ordinary-speech NONE, strong-restriction REQUIRED, declined-advisory scenarios pass.
+- [x] 4.2 REQUIRED protocol: closed ReviewEnvelope construction, scripted ReviewerPort flow, PASS bound to digests/versions, version-recheck after model wait, HOLD on CONCERNS/INSUFFICIENT_CONTEXT/missing facts/timeout, no downgrade on resubmission. Verify: version-change-voids-pass and facts-missing-hold scenarios pass.
 
 ## 5. Stories and closure
 
