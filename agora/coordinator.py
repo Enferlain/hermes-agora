@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from agora.commit_gate import CommitGate, GateContext
-from agora.context_memory import ContextMemory, MemoryStateError
+from agora.context_memory import ContextMemory, MemoryStateError, ViewAdmissionError
 from agora.contracts import (
     REF_TARGETS,
     AgentIdentity,
@@ -27,6 +27,7 @@ from agora.contracts import (
     ContentFragment,
     ContextSnapshot,
     DecisionKind,
+    Disposition,
     Effect,
     EffectKind,
     EffectPlan,
@@ -287,16 +288,40 @@ class Coordinator:
                 # records; the crashed run's unaccepted records remain as
                 # history and never collide (§3, §7 CAS acceptance).
                 call_id = f"{work_id}:{step_index}.e{self.core.runtime_epoch}"
-                snapshot = self.context_memory.build_snapshot(
-                    identity_ref=RecordRef(id=self.identity.id, revision=self.identity.revision),
-                    intent_ref=chosen_intent,
-                    audience_ref=RecordRef(id=self.audience.id, revision=self.audience.revision),
-                    episode_ref=episode_ref,
-                    sink_ref=self.sink_ref,
-                    effect_capable=True,
-                    call_id=call_id,
-                    active_view_refs=tuple(held_view_refs),
-                )
+                try:
+                    snapshot = self.context_memory.build_snapshot(
+                        identity_ref=RecordRef(
+                            id=self.identity.id, revision=self.identity.revision
+                        ),
+                        intent_ref=chosen_intent,
+                        audience_ref=RecordRef(
+                            id=self.audience.id, revision=self.audience.revision
+                        ),
+                        episode_ref=episode_ref,
+                        sink_ref=self.sink_ref,
+                        effect_capable=True,
+                        call_id=call_id,
+                        active_view_refs=tuple(held_view_refs),
+                    )
+                except ViewAdmissionError as error:
+                    # A turn-held view that can no longer be admitted (say,
+                    # revoked or superseded between grant and use) is a typed
+                    # denial: the turn holds with VIEW_FORBIDDEN and the work
+                    # still completes — never a stranded RUNNING row with a
+                    # live lease (review finding on run_turn exception safety).
+                    decision = CommitDecision(
+                        id=f"decision:admission:{work_id}:{step_index}",
+                        revision=1,
+                        created_at=self.clock.now_rfc3339(),
+                        kind=DecisionKind.DENIED,
+                        reason_codes=(error.code,),
+                        authorization_ref=None,
+                        assessment_ref=None,
+                    )
+                    self.core.put_record(decision)
+                    outcome_kind = OutcomeKind.HELD
+                    reason_codes = [error.code]
+                    break
                 messages = [{"role": "user", "content": _context_summary(snapshot)}]
                 messages.extend({"role": "user", "content": notice} for notice in notices)
                 envelope = self.context_memory.record_envelope(
@@ -332,10 +357,48 @@ class Coordinator:
 
                 if isinstance(step, ModelFinishStep):
                     if step.outcome == FinishChoice.DEFER:
-                        decision, receipt_ref, refs = self._defer(work_id, chosen_intent)
+                        # A DEFER resolution is a plan like any other (§6.1
+                        # DRAFT→…→DEFERRED): it routes through the gate, so a
+                        # strong-sensitive defer gets its applicable
+                        # assessment instead of bypassing review (§6.4).
+                        work_row = self.core.get_work(work_id)
+                        assert work_row is not None
+                        submissions = work_row["submissions_used"]
+                        if submissions >= self.config.max_plan_submissions:
+                            if outcome_kind is None:
+                                outcome_kind = OutcomeKind.FAILED_INTERNAL
+                                reason_codes.append(ReasonCode.BUDGET_EXHAUSTED)
+                            break
+                        defer_step = ModelSubmitPlanStep(
+                            kind=MainStepKind.SUBMIT_PLAN,
+                            intent_ref=chosen_intent,
+                            disposition=Disposition.DEFER,
+                            effects=(),
+                            declared_fact_refs=(),
+                        )
+                        decision, receipt_ref, refs = self._submit_plan(
+                            work_id,
+                            defer_step,
+                            snapshot,
+                            chosen_intent,
+                            proposal_revision=submissions + 1,
+                        )
                         effect_refs.extend(refs)
-                        outcome_kind = OutcomeKind.DEFERRED
-                        reason_codes = []
+                        if decision.kind == DecisionKind.DEFERRED:
+                            self._defer_intent(work_id, chosen_intent)
+                            outcome_kind = OutcomeKind.DEFERRED
+                            reason_codes = []
+                            break
+                        # A held defer is terminal: the FINISH step signals
+                        # completion intent, so a review-held deferral ends
+                        # the turn HELD with the decision on record (a
+                        # SUBMIT_PLAN(DEFER) step, by contrast, keeps the
+                        # ordinary revision loop).
+                        outcome_kind = OutcomeKind.HELD
+                        reason_codes = list(decision.reason_codes)
+                        notices.append(
+                            "held:" + ",".join(code.value for code in decision.reason_codes)
+                        )
                     else:
                         # An explicit stand-down after a held submission is
                         # normal silence: NO_ACTION, with the held decision
@@ -532,10 +595,19 @@ class Coordinator:
                     "disposition": step.disposition.value,
                     "effects": [_json_dumps(self._render(d)) for d in step.effects],
                     "intent": intent_ref.to_payload(),
+                    # §4.4 exact-proposal binding: the plan's context is part
+                    # of its identity, so a PASS keyed to the digest cannot
+                    # silently travel to a plan built on another snapshot.
+                    "snapshot": snapshot.id,
+                    "coverage": snapshot.producer_coverage_ref.id,
                 }
             ),
-            defer_until=None,
-            defer_expires_at=None,
+            defer_until=(
+                self.clock.now_rfc3339() if step.disposition == Disposition.DEFER else None
+            ),
+            defer_expires_at=(
+                self.clock.now_rfc3339() if step.disposition == Disposition.DEFER else None
+            ),
             declared_fact_refs=tuple(step.declared_fact_refs),
             observed_target_refs=(),
             producer_coverage_ref=RecordRef(
@@ -733,11 +805,10 @@ class Coordinator:
             emoji=draft.emoji or "🙂",
         )
 
-    def _defer(
-        self, work_id: str, intent_ref: RecordRef
-    ) -> tuple[CommitDecision, RecordRef | None, list[RecordRef]]:
-        """FINISH/DEFER: persist a deferred intent with an explicit due
-        condition (fixed time in this slice) — never a promise to reply."""
+    def _defer_intent(self, work_id: str, intent_ref: RecordRef) -> None:
+        """Persist a deferred intent with an explicit due condition (fixed
+        time in this slice) — never a promise to reply. The DEFERRED decision
+        itself comes from the gate, which routed the defer plan."""
         intent_record = self.core.get_record(intent_ref.id, intent_ref.revision)
         if isinstance(intent_record, Intent):
             deferred = Intent(
@@ -758,17 +829,6 @@ class Coordinator:
                 state=IntentState.DEFERRED,
             )
             self.core.put_record(deferred)
-        decision = CommitDecision(
-            id=f"decision:defer:{work_id}",
-            revision=1,
-            created_at=self.clock.now_rfc3339(),
-            kind=DecisionKind.DEFERRED,
-            reason_codes=(ReasonCode.DEFERRED,),
-            authorization_ref=None,
-            assessment_ref=None,
-        )
-        self.core.put_record(decision)
-        return decision, None, []
 
     def _create_intent(self, goal_text: str, purpose_class: str) -> RecordRef:
         """Grantless autonomous intent creation (I01/D02): a valid goal from

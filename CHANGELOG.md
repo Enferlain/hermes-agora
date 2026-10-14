@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), with the change of using daily dated entries instead of releases.
 
+## 2026-10-15
+
+### Added
+
+- Review pass on M2 sections 4+5 (GLM-flash, findings adversarially triaged after the verification stage hit the shared model limit): DEFER resolutions now route through the CommitGate — a strong-sensitive defer gets its applicable assessment instead of bypassing review, and a DEFER plan carries the defer fields the record contract requires; runtime fact coverage is assigned by construction, so a PASS must both claim FACT_COMPARISON and be backed by comparison views over every restricting commitment's resource (a reviewer self-report alone never authorizes); routing also reads the commitments attached to the coverage's policies; the proposal digest binds the snapshot and producer coverage; and an effect's destination must match the audience the snapshot reviewed, not merely an allowed destination. `propose_memory` binds ROOM scope to the destination of the context that supplied the bytes (a DM observation cannot be stored as public-room-scoped; RELATIONSHIP/PROJECT have no curated mapping yet and are refused) and inherits commitments carried by the granted views that returned the cited fragments, closing a storage-laundering path. Mid-turn view-admission failures are typed VIEW_FORBIDDEN denials that complete the work item instead of stranding it RUNNING with a live lease. Seventeen regression tests pin the REVIEW_TIMEOUT, descriptors-only, §8.5 snapshot-invalidation, ACT-only-advisory, notice-boundary (necessity text never reaches envelopes), malformed/denied REQUEST_ACCESS turn paths, production coverage-driven REQUIRED routing, submissions budget, re-proposal idempotence, scope binding, view inheritance, policy-attached routing, and destination-binding behaviors. Episode-scoped selection is surfaced as beads work (the selector reads recent ingestion globally; the membership model needs a design decision) rather than silently patched.
+
 ## 2026-10-14
 
 ### Added

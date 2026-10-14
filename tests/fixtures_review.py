@@ -190,6 +190,7 @@ def review_snapshot(
     inherited_commitment_refs: tuple[RecordRef, ...] = (),
     views: tuple[MemoryView, ...] = (),
     effect_capable: bool = True,
+    policy_refs: tuple[RecordRef, ...] = (),
 ) -> ContextSnapshot:
     """Assemble + persist a snapshot with explicit inherited commitments
     and active views — the M2 fields ContextMemory.build_snapshot does not
@@ -206,7 +207,7 @@ def review_snapshot(
         input_fragment_refs=selected_fragment_refs,
         input_view_refs=view_refs,
         input_intent_refs=(intent_ref,),
-        input_policy_refs=(),
+        input_policy_refs=policy_refs,
         sink_ref=stack.sink_ref,
         call_id=call_id,
         runtime_epoch=stack.core.runtime_epoch,
@@ -310,6 +311,8 @@ def speak_plan(
                 "disposition": Disposition.ACT.value,
                 "effects": [effect.payload_digest],
                 "intent": intent_ref.to_payload(),
+                "snapshot": snapshot.id,
+                "coverage": snapshot.producer_coverage_ref.id,
             }
         ),
         defer_until=None,
@@ -347,6 +350,8 @@ def quiet_plan(
                 "disposition": Disposition.QUIET.value,
                 "effects": [],
                 "intent": intent_ref.to_payload(),
+                "snapshot": snapshot.id,
+                "coverage": snapshot.producer_coverage_ref.id,
             }
         ),
         defer_until=None,

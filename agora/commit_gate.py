@@ -7,25 +7,31 @@ authorization directly.
 Routing is the §8 first-slice table: HARD_DENY still covers the
 deterministic code-check failures (invalid capability/sink/context/bytes);
 REQUIRED when an active STRONG commitment in the snapshot, the plan's
-runtime producer coverage, or the derived intent needs expression or
-observable-use resolution — a QUIET/DEFER resolution under such a
-restriction routes REQUIRED too, so the resolution itself is reviewed;
-ADVISORY for fixture-configured ordinary concerns (ACT plans only); NONE
-otherwise. Routing reads commitment and coverage facts only: sensor scores
-have no path into REQUIRED.
+runtime producer coverage (fragments, views, intents, and the policies the
+coverage cites), or the derived intent needs expression or observable-use
+resolution — a QUIET/DEFER resolution under such a restriction routes
+REQUIRED too, so the resolution itself is reviewed; ADVISORY for
+fixture-configured ordinary concerns on ACT plans only (advice informs a
+draft; a QUIET or DEFER has no bytes to advise on, so those route NONE);
+NONE otherwise. Routing reads commitment and coverage facts only: sensor
+scores have no path into REQUIRED.
 
 REQUIRED builds the closed ReviewEnvelope (the 2026-10-12 note closes the
 field set — no release-ledger field), persists the routing decision as a
 ReviewRequirement, waits on the scripted ReviewerPort, and binds the
 assessment to the exact proposal digest, the routing-time policy/commitment
-versions, and the snapshot revision. After the reviewer wait the gate
-rechecks those versions; any drift voids the pass (§8.5). Reviewer absence,
+versions, and the snapshot revision. Runtime coverage is assigned by
+construction, not by reviewer self-report (§5): the gate derives what the
+envelope structurally supplies — every restricting commitment must have a
+comparison view over its resource — and a PASS whose claimed coverage does
+not match does not authorize. After the reviewer wait the gate rechecks
+the bound versions; any drift voids the pass (§8.5). Reviewer absence,
 failure, or timeout, CONCERNS / INSUFFICIENT_CONTEXT results, non-fact
-runtime coverage, and missing comparison views all HOLD the proposal. There
-is no downgrade on resubmission: a rewrite is a new proposal_revision whose
-route is computed from scratch, and the assessment id embeds the plan id
-plus the revision, so a failed assessment is a distinct record that is
-never reused.
+runtime coverage, and missing comparison views all HOLD the proposal.
+There is no downgrade on resubmission: a rewrite is a new
+proposal_revision whose route is computed from scratch, and the assessment
+id embeds the plan id plus the revision, so a failed assessment is a
+distinct record that is never reused.
 """
 
 from __future__ import annotations
@@ -55,6 +61,7 @@ from agora.contracts import (
     ReasonCode,
     Record,
     RecordRef,
+    ResourcePolicy,
     ReviewAssessment,
     ReviewCoverage,
     ReviewEnvelope,
@@ -241,6 +248,19 @@ class CommitGate:
                 view = self._load(view_ref, MemoryView)
                 if isinstance(view, MemoryView):
                     self._collect(view.inherited_commitment_refs, found)
+            for policy_ref in coverage.input_policy_refs:
+                # A restriction can arrive through the policy rather than
+                # the data: the coverage's policies' commitments count as
+                # plan inputs exactly like fragment commitments (review
+                # finding on the routing scan). Resolved at their CURRENT
+                # revision — routing must not miss a restriction because a
+                # pinned guess went stale.
+                policy = self._load(policy_ref, ResourcePolicy)
+                if isinstance(policy, ResourcePolicy):
+                    for commitment_ref in policy.commitment_refs:
+                        current = self.core.current_ref(commitment_ref.id)
+                        if current is not None:
+                            found[commitment_ref.id] = current
             for intent_ref in coverage.input_intent_refs:
                 self._collect_intent(intent_ref, found)
         self._collect_intent(plan.intent_ref, found)
@@ -338,9 +358,14 @@ class CommitGate:
             return False, (ReasonCode.REVIEW_CONCERN,), _ref(assessment)
         if assessment.result == AssessmentResult.INSUFFICIENT_CONTEXT:
             return False, (ReasonCode.REVIEW_FACTS_MISSING,), _ref(assessment)
-        if assessment.runtime_assigned_coverage != ReviewCoverage.FACT_COMPARISON:
-            # A pass claimed without full fact-comparison coverage does not
-            # authorize (§8.4: PASS *with full expected runtime coverage*).
+        if assessment.runtime_assigned_coverage != ReviewCoverage.FACT_COMPARISON or (
+            not self._structurally_fact_covered(envelope, routing)
+        ):
+            # Runtime coverage is assigned by construction, not accepted
+            # from the reviewer's self-report (§5): a PASS must BOTH claim
+            # full fact comparison AND be backed by comparison views over
+            # every restricting commitment's resource. Descriptors alone
+            # never satisfy the slice's REQUIRED semantic resolution.
             return False, (ReasonCode.REVIEW_FACTS_MISSING,), _ref(assessment)
         if self._versions_changed(policy_vector, plan.snapshot_ref):
             # §8.5: an assessment against changed versions does not
@@ -476,6 +501,23 @@ class CommitGate:
         self.core.put_record(assessment)
         return assessment
 
+    def _structurally_fact_covered(self, envelope: ReviewEnvelope, routing: _Routing) -> bool:
+        """What the envelope actually supplies: every restricting commitment
+        with a resource must have a comparison view over that resource (a
+        scope-level restriction without a resource accepts any authorized
+        view as its comparison basis — the best evidence available)."""
+        view_resources: set[str | None] = set()
+        for view_ref in envelope.comparison_view_refs:
+            view = self._load(view_ref, MemoryView)
+            if isinstance(view, MemoryView):
+                view_resources.add(view.resource_id)
+        if not view_resources:
+            return False
+        for commitment in routing.relevant_commitments:
+            if commitment.resource_id is not None and commitment.resource_id not in view_resources:
+                return False
+        return True
+
     def _versions_changed(self, vector: tuple[RecordRef, ...], snapshot_ref: RecordRef) -> bool:
         """§8.5 recheck after the model wait: the assessment authorizes only
         against unchanged versions — every bound record still at its bound
@@ -516,6 +558,18 @@ class CommitGate:
             raise GateRejection(ReasonCode.STALE_CONTEXT, "snapshot missing or invalid")
         if not snapshot.effect_capable:
             raise GateRejection(ReasonCode.CONTEXT_MISMATCH, "snapshot not effect-capable")
+        audience = self._load(snapshot.audience_ref, AudienceSnapshot)
+        if (
+            not isinstance(audience, AudienceSnapshot)
+            or audience.destination_id != effect.destination_id
+        ):
+            # The reviewed audience is the delivery audience: a review of
+            # room A's context cannot authorize bytes into room B, even when
+            # the capability allows both (review finding on destination
+            # binding).
+            raise GateRejection(
+                ReasonCode.CONTEXT_MISMATCH, "effect destination differs from the reviewed audience"
+            )
         sink = self._load(snapshot.sink_ref, ComputeSink)
         if not isinstance(sink, ComputeSink):
             raise GateRejection(ReasonCode.SINK_FORBIDDEN, "compute sink missing")

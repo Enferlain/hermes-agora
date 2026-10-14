@@ -189,10 +189,12 @@ class ScriptedMainModel:
 
 class ScriptedReviewer:
     """Deterministic reviewer port (handoff §9): scripted assessments in
-    order; the same call index always returns the same result, so a crash
-    between review and acceptance replays identically. Running past the
-    script is an error, never invention — the gate converts any reviewer
-    error into a HOLD, so the script can never manufacture a PASS."""
+    order. Determinism is a property of the script plus the turn's CAS step
+    acceptance: a resumed turn re-invokes the port at the same scripted
+    position and gets the same assessment, while a completed turn is never
+    re-executed. Running past the script is an error, never invention — the
+    gate converts any reviewer error into a HOLD, so the script can never
+    manufacture a PASS."""
 
     def __init__(self, assessments: Sequence[ReviewAssessmentData]) -> None:
         self._assessments = tuple(assessments)

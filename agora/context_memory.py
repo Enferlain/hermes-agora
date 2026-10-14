@@ -914,9 +914,12 @@ class ContextMemory:
         model may only cite fragments the runtime actually supplied, so a
         forged or declared-parent-omitted citation is a typed
         INVALID_REFERENCE, never a silent write. Storage inherits every
-        source commitment (a request cannot discharge commitments) and is
-        refused when a STRONG commitment forbids internal use. Scope is
-        never widened: BROAD needs a curated scope-change permission that
+        source commitment — the cited fragments' own plus any carried by the
+        granted views that returned them (a request cannot discharge
+        commitments) — and is refused when a STRONG commitment forbids
+        internal use. Scope is never widened: an ordinary observation is
+        retained in its source room (the turn's destination) or as the
+        agent's own; BROAD needs a curated scope-change permission that
         does not exist in this slice, DURABLE needs an existing CANDIDATE,
         and promotions carry the existing scope unchanged."""
         if existing_memory_ref is not None:
@@ -937,6 +940,7 @@ class ContextMemory:
                 ReasonCode.POLICY_FORBIDDEN,
                 "BROAD scope requires an explicit curated scope-change permission",
             )
+        self._check_memory_scope(requested_scope_kind, scope_ref, runtime_origin)
         supplied = self._runtime_supplied_refs(runtime_origin)
         for ref in source_refs:
             if ref not in supplied:
@@ -950,6 +954,19 @@ class ContextMemory:
             assert isinstance(fragment, ContentFragment)
             for commitment_ref in fragment.commitment_refs:
                 inherited[commitment_ref.id] = commitment_ref
+        # A fragment obtained through a granted view carries that view's
+        # inherited commitments too — the authorization chain's restrictions
+        # (which may exceed the fragment's own) travel with the bytes, so
+        # storage cannot launder them by citing only fragment-level
+        # commitments (review finding on propose_memory inheritance).
+        coverage = self._origin_coverage(runtime_origin)
+        for view_ref in coverage.input_view_refs:
+            view = self.core.get_record(view_ref.id, view_ref.revision)
+            if not isinstance(view, MemoryView):
+                continue
+            if any(ref in view.returned_fragment_refs for ref in source_refs):
+                for commitment_ref in view.inherited_commitment_refs:
+                    inherited[commitment_ref.id] = commitment_ref
         for commitment_ref in sorted(inherited.values(), key=lambda r: r.id):
             commitment = self.core.get_record(commitment_ref.id, commitment_ref.revision)
             if (
@@ -1027,10 +1044,41 @@ class ContextMemory:
         self.core.promote_memory(memory, expiry_ms=None)
         return RecordRef(id=memory.id, revision=memory.revision)
 
-    def _runtime_supplied_refs(self, runtime_origin: RuntimeOrigin) -> frozenset[RecordRef]:
-        """The fragment refs the runtime actually put in front of the model:
-        the producer coverage's input fragments plus every fragment an input
-        view returned. Nothing else is citable lineage."""
+    def _check_memory_scope(
+        self, scope_kind: ScopeKind, scope_ref: str, runtime_origin: RuntimeOrigin
+    ) -> None:
+        """Scope is bound to the turn, not chosen freely (handoff §6.4:
+        ordinary observations are retained 'in their source room'): an
+        AGENT-scoped memory is the agent's own and always allowed; a
+        ROOM-scoped memory must name the destination of the context the
+        runtime actually supplied. RELATIONSHIP and PROJECT have no curated
+        mapping in this slice and are refused rather than guessed."""
+        if scope_kind is ScopeKind.AGENT:
+            return
+        if scope_kind is not ScopeKind.ROOM:
+            raise MemoryStateError(
+                ReasonCode.POLICY_FORBIDDEN,
+                f"{scope_kind.value} scope has no curated mapping in this slice",
+            )
+        snapshot = (
+            self.core.get_record(
+                runtime_origin.snapshot_ref.id, runtime_origin.snapshot_ref.revision
+            )
+            if runtime_origin.snapshot_ref is not None
+            else None
+        )
+        if not isinstance(snapshot, ContextSnapshot):
+            raise MemoryStateError(
+                ReasonCode.INVALID_REFERENCE, "runtime origin cites a missing snapshot"
+            )
+        audience = self.core.get_record(snapshot.audience_ref.id, snapshot.audience_ref.revision)
+        if not isinstance(audience, AudienceSnapshot) or audience.destination_id != scope_ref:
+            raise MemoryStateError(
+                ReasonCode.POLICY_FORBIDDEN,
+                f"room scope must match the turn's destination ({scope_ref!r} does not)",
+            )
+
+    def _origin_coverage(self, runtime_origin: RuntimeOrigin) -> ProducerCoverage:
         if runtime_origin.producer_coverage_ref is None:
             raise MemoryStateError(
                 ReasonCode.INVALID_REFERENCE, "runtime origin carries no producer coverage"
@@ -1042,6 +1090,13 @@ class ContextMemory:
             raise MemoryStateError(
                 ReasonCode.INVALID_REFERENCE, "runtime origin cites a missing producer coverage"
             )
+        return coverage
+
+    def _runtime_supplied_refs(self, runtime_origin: RuntimeOrigin) -> frozenset[RecordRef]:
+        """The fragment refs the runtime actually put in front of the model:
+        the producer coverage's input fragments plus every fragment an input
+        view returned. Nothing else is citable lineage."""
+        coverage = self._origin_coverage(runtime_origin)
         supplied = set(coverage.input_fragment_refs)
         for view_ref in coverage.input_view_refs:
             view = self.core.get_record(view_ref.id, view_ref.revision)
