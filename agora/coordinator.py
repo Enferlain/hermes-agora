@@ -325,6 +325,11 @@ class Coordinator:
                     elif decision.kind == DecisionKind.DENIED:
                         outcome_kind = OutcomeKind.HELD
                         reason_codes.extend(decision.reason_codes)
+                    elif decision.kind == DecisionKind.HOLD:
+                        # A held required review stays local: no dispatch, no
+                        # fallback (I07/I13); resubmission is a fresh revision.
+                        outcome_kind = OutcomeKind.HELD
+                        reason_codes.extend(decision.reason_codes)
                     elif decision.kind == DecisionKind.QUIET_COMPLETED:
                         outcome_kind = OutcomeKind.NO_ACTION
                     break

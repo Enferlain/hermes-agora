@@ -187,6 +187,33 @@ class ScriptedMainModel:
         return self._steps[index]
 
 
+class ScriptedReviewer:
+    """Deterministic reviewer port (handoff §9): scripted assessments in
+    order; the same call index always returns the same result, so a crash
+    between review and acceptance replays identically. Running past the
+    script is an error, never invention — the gate converts any reviewer
+    error into a HOLD, so the script can never manufacture a PASS."""
+
+    def __init__(self, assessments: Sequence[ReviewAssessmentData]) -> None:
+        self._assessments = tuple(assessments)
+        self._calls = 0
+
+    @property
+    def calls(self) -> int:
+        """Assessments handed out so far; routing tests assert the NONE
+        route never reaches the reviewer."""
+        return self._calls
+
+    def assess(self, envelope: Any) -> ReviewAssessmentData:
+        index = self._calls
+        self._calls += 1
+        if index >= len(self._assessments):
+            raise RuntimeError(
+                f"scripted reviewer exhausted after {len(self._assessments)} assessments"
+            )
+        return self._assessments[index]
+
+
 class MainModelPort(Protocol):
     """One deliberation step: envelope in, typed decision out (handoff §5)."""
 
