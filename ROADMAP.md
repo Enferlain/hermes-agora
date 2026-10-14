@@ -2,7 +2,7 @@
 
 Proposed development sequence · 8 October 2026
 
-> **Status:** Active roadmap — M0 and M1 complete (per Beads); M2 is the active milestone
+> **Status:** Active roadmap — M0, M1 and M2 complete (per Beads); M3 is the active milestone
 >
 > Milestone completion is tracked in Beads. This file describes intended sequencing and exit criteria.
 

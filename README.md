@@ -195,11 +195,11 @@ Transport is a lifecycle and delivery boundary, not a second mind.
 
 ## Current status
 
-M0 (project foundation) and M1 (one deterministic end-to-end turn) are implemented and tested; milestone completion state lives in Beads.
+M0 (project foundation), M1 (one deterministic end-to-end turn) and M2 (contextual discretion and protected views) are implemented and tested; milestone completion state lives in Beads.
 
-The implemented replay slice covers: the full typed contract layer, two SQLite ownership domains with crash-safe ingestion and epoch fencing, the virtual clock and fault checkpoints, and the whole-turn path (coordinator, context assembly with producer coverage, CommitGate, fake sidecar/world) demonstrating message, reaction, explicit silence and timer-driven initiation via `agora replay`.
+The implemented replay slice covers: the full typed contract layer, two SQLite ownership domains with crash-safe ingestion and epoch fencing, the virtual clock and fault checkpoints, the whole-turn path (coordinator, context assembly with producer coverage, CommitGate, fake sidecar/world) demonstrating message, reaction, explicit silence and timer-driven initiation via `agora replay`, and M2's discretion layer — typed-ref verification at insert, manifest-seeded authority registries, the pure authority evaluator with fixed fail-closed ordering, purpose-aware protected views with the two fixed transforms, scoped memory with staged promotion and correction invalidation, INTERNAL_ONLY containment at snapshot build, §8 review routing with the REQUIRED assessment protocol, and the coordinator's REQUEST_ACCESS/PROPOSE_MEMORY paths with runtime-origin binding.
 
-M2 (contextual discretion and protected views) is the active milestone. A deterministic replay environment with synthetic resources and a fake transport remains the test bed until M3; it is intended to validate:
+M3 (restart-safe replay slice) is the active milestone: dispatch-time revalidation, acknowledged supersession, release limits, retry/reconciliation rules, and the crash-boundary/replay acceptance battery (I01–I16, the three handoff stories). A deterministic replay environment with synthetic resources and a fake transport remains the test bed; it is intended to validate:
 
 - provenance propagation
 - autonomous intent creation
