@@ -14,7 +14,7 @@ import json
 import sqlite3
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +22,10 @@ from agora.contracts import (
     ANY_TARGET,
     REASON_CODES,
     RECORD_TYPES,
+    ConversationEpisode,
     DependencyKind,
+    EventKind,
+    InboundEvent,
     MemoryRecord,
     MemoryStage,
     PayloadStatus,
@@ -266,6 +269,26 @@ class WorkSeed:
 
 
 WorkPlanner = Callable[[JournalEntry], WorkSeed | None]
+
+
+@dataclass(frozen=True, slots=True)
+class EventBinding:
+    """Per-event enrichment an ``InboundEvent`` record needs beyond the
+    normalized transport row (handoff §4 InboundEvent, §7 transport.events):
+    the actor, the audience the event was observed in, and the episode it
+    joins. Supplied by the coordinator/fixture ingest policy. Membership
+    confers no scope rights (handoff §5) — it only narrows context."""
+
+    episode_ref: str
+    actor_ref: RecordRef
+    source_audience_ref: RecordRef
+    occurred_at: str | None = None
+    reply_target_refs: tuple[RecordRef, ...] = ()
+    target_refs: tuple[RecordRef, ...] = ()
+    observed_trigger_refs: tuple[RecordRef, ...] = ()
+
+
+EventPlanner = Callable[[JournalEntry], EventBinding | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1263,12 +1286,93 @@ def check_invariants(core: CoreStore, transport: TransportStore) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+def _bind_event_tx(
+    core: CoreStore,
+    connection: sqlite3.Connection,
+    entry: JournalEntry,
+    binding: EventBinding,
+    *,
+    ingested_at: str,
+    bound: list[Record],
+) -> None:
+    """Bind one journal entry to its episode inside the caller's
+    transaction: create the ``InboundEvent`` record when absent, then
+    append it to the episode's membership when the episode record exists.
+    Every step is idempotent, so newly applied entries and crash-replayed
+    duplicates take the same path — a replay repairs a first pass whose
+    episode or fragment records had not been seeded yet, instead of
+    leaving the event permanently outside its episode's context.
+
+    Fail-closed rules: GAP-recovery rows are transport bookkeeping, never
+    members; an entry citing a fragment with no core record gets no
+    InboundEvent and no membership (the raw ingestion row still lands and
+    the cursor still advances — an enrichment gap never blocks journal
+    continuity); unknown event kinds are future typed extensions (§4) —
+    never silently mapped, so the enum conversion raises."""
+    if entry.recovery == RecoveryStatus.GAP.value:
+        return
+    if core.get_record(entry.source_event_id, entry.source_revision) is None:
+        fragment_refs = _bound_fragment_refs(core, entry)
+        if fragment_refs is None:
+            return
+        event = InboundEvent(
+            id=entry.source_event_id,
+            revision=entry.source_revision,
+            created_at=ingested_at,
+            source_event_id=entry.source_event_id,
+            journal_seq=entry.journal_seq,
+            kind=EventKind(entry.kind),
+            actor_ref=binding.actor_ref,
+            occurred_at=binding.occurred_at or ingested_at,
+            ingested_at=ingested_at,
+            source_audience_ref=binding.source_audience_ref,
+            fragment_refs=fragment_refs,
+            reply_target_refs=binding.reply_target_refs,
+            target_refs=binding.target_refs,
+            observed_trigger_refs=binding.observed_trigger_refs,
+            recovery=RecoveryStatus(entry.recovery),
+        )
+        core._put_record_tx(connection, event)
+        bound.append(event)
+    episode = core.get_record(binding.episode_ref)
+    if not isinstance(episode, ConversationEpisode):
+        return
+    event_ref = RecordRef(id=entry.source_event_id, revision=entry.source_revision)
+    if any(ref.id == event_ref.id for ref in episode.member_event_refs):
+        return
+    updated = replace(
+        episode,
+        revision=episode.revision + 1,
+        member_event_refs=(*episode.member_event_refs, event_ref),
+    )
+    core._put_record_tx(connection, updated)
+    # the episode revision is verified like any other record write, so the
+    # member ref cannot dangle even if this path ever changes
+    bound.append(updated)
+
+
+def _bound_fragment_refs(core: CoreStore, entry: JournalEntry) -> tuple[RecordRef, ...] | None:
+    """The entry's fragment ids resolved to their current core records —
+    an event's content is what it carried when ingested, so the refs pin
+    the revision current at ingest time. None when any fragment has no
+    core record: the binding is skipped fail-closed rather than raising,
+    so a mis-ordered entry can never block the cursor."""
+    refs: list[RecordRef] = []
+    for fragment_id in entry.fragment_refs:
+        ref = core.current_ref(fragment_id)
+        if ref is None:
+            return None
+        refs.append(ref)
+    return tuple(refs)
+
+
 def ingest_batch(
     core: CoreStore,
     transport: TransportStore,
     *,
     consumer_id: str,
     planner: WorkPlanner | None = None,
+    event_planner: EventPlanner | None = None,
     ingested_at: str,
     limit: int = 64,
     injector: Any = None,
@@ -1279,6 +1383,13 @@ def ingest_batch(
     advances the contiguous cursor — committed BEFORE the transport
     acknowledgement. Entries the journal no longer retains become explicit
     GAP rows; a never-written missing seq blocks the cursor instead.
+
+    With an ``event_planner``, each entry — newly applied or replayed as a
+    duplicate — gets its InboundEvent record and episode membership append
+    in the same transaction when its policy binds it (bead 93h: context
+    selection is episode-scoped through ConversationEpisode.member_event_refs).
+    Binding is idempotent, so a crash-replayed duplicate repairs a first
+    pass whose episode or fragment records had not been seeded yet.
     """
     plan = planner if planner is not None else default_work_planner
     cursor = core.cursor
@@ -1288,6 +1399,7 @@ def ingest_batch(
     duplicates: list[int] = []
     gap_filled: list[int] = []
     blocked_missing: int | None = None
+    bound: list[Record] = []
 
     with core.transaction() as connection:
         for entry in entries:
@@ -1338,6 +1450,15 @@ def ingest_batch(
                     ingested_at=ingested_at,
                 )
                 applied.append(entry.journal_seq)
+            if event_planner is not None:
+                binding = event_planner(entry)
+                if binding is not None:
+                    # one idempotent path for applied entries and replayed
+                    # duplicates: a duplicate repairs a first pass whose
+                    # episode or fragment records had not been seeded yet
+                    _bind_event_tx(
+                        core, connection, entry, binding, ingested_at=ingested_at, bound=bound
+                    )
             seed = plan(entry)
             if seed is not None:
                 core._create_work_tx(
@@ -1349,6 +1470,11 @@ def ingest_batch(
                     runtime_epoch=core.runtime_epoch,
                 )
             cursor = entry.journal_seq
+        if bound:
+            # Verified once after every insert, like put_records: the episode
+            # revision can cite the InboundEvent written earlier in the same
+            # transaction.
+            core._verify_ref_targets_tx(connection, tuple(bound))
         core._set_meta_tx("cursor", cursor)
 
     if injector is not None:

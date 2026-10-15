@@ -390,12 +390,15 @@ def feed_event(
     *,
     fragment_id: str | None = None,
     episode_id: str = "episode:room:public",
+    container_id: str = "room:public",
 ) -> None:
     """Ingest one journal event: an ordinary text fragment by default, or
     an existing seeded fragment (e.g. the restricted finance resource) by
     id — its commitments then travel through runtime producer coverage.
     Works are grouped under ``episode_id`` (a ConversationEpisode record is
-    created if missing) so turns see the episode's fragments in context."""
+    created if missing) and the event is bound to that episode's
+    membership (InboundEvent record + member_event_refs append, bead 93h),
+    so turns see exactly the episode's fragments in context."""
     if fragment_id is None:
         fragment_id = f"fragment:evt:{seq}"
         payload_id = f"payload:evt:{seq}"
@@ -420,7 +423,7 @@ def feed_event(
                 id=episode_id,
                 revision=1,
                 created_at=stack.clock.now_rfc3339(),
-                container_id="room:public",
+                container_id=container_id,
                 member_event_refs=(),
                 reply_edges=(),
                 topic_refs=(),
@@ -443,8 +446,68 @@ def feed_event(
         )
     )
     stack.coordinator.ingest(
-        stack.transport, consumer_id="core-1", planner=_episode_planner(episode_id)
+        stack.transport,
+        consumer_id="core-1",
+        planner=_episode_planner(episode_id),
+        event_planner=_event_planner(
+            episode_id,
+            actor_ref=RecordRef(id="principal:agent", revision=1),
+            source_audience_ref=ensure_audience(stack, container_id),
+        ),
     )
+
+
+def _event_planner(
+    episode_id: str,
+    *,
+    actor_ref: RecordRef,
+    source_audience_ref: RecordRef,
+) -> Any:
+    from agora.stores import EventBinding
+
+    def bind(entry: JournalEntry) -> EventBinding | None:
+        return EventBinding(
+            episode_ref=episode_id,
+            actor_ref=actor_ref,
+            source_audience_ref=source_audience_ref,
+        )
+
+    return bind
+
+
+def ensure_audience(stack: ReviewStack, destination_id: str) -> RecordRef:
+    """The audience record for a destination, created if missing — the
+    bootstrap convention ``audience:{destination_id}`` with public-room
+    shape, mirroring Coordinator.bootstrap."""
+    audience_id = f"audience:{destination_id}"
+    existing = stack.core.current_ref(audience_id)
+    if existing is not None:
+        return existing
+    from agora.contracts import (
+        AudienceSnapshot,
+        Completeness,
+        EnvironmentKind,
+        HistoryVisibility,
+        Visibility,
+    )
+
+    stack.core.put_record(
+        AudienceSnapshot(
+            id=audience_id,
+            revision=1,
+            created_at=stack.clock.now_rfc3339(),
+            destination_id=destination_id,
+            environment_kind=EnvironmentKind.ROOM,
+            visibility=Visibility.PUBLIC,
+            known_principal_refs=(RecordRef(id="principal:agent", revision=1),),
+            unknown_readers=True,
+            history_visibility=HistoryVisibility.PUBLIC_HISTORY,
+            completeness=Completeness.OBSERVED,
+            disclosure_context_revision=1,
+            valid_until=None,
+        )
+    )
+    return RecordRef(id=audience_id, revision=1)
 
 
 def _episode_planner(episode_id: str) -> Any:

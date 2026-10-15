@@ -7,7 +7,6 @@ payload read; there is no global retrieval index.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -481,22 +480,42 @@ def test_context_budget_is_shared_across_episodes_and_memories(tmp_path: Path) -
             eligibility_status=EligibilityStatus.ACTIVE,
         )
     )
-    core._conn.execute(
-        "INSERT INTO core_ingestion (consumer_id, source_event_id, source_revision,"
-        " journal_seq, fragment_refs, recovery, ingested_at) VALUES ('c', 'evt:big', 1, 1,"
-        " ?, 'COMPLETE', ?)",
-        (json.dumps([big_fragment]), ANCHOR),
-    )
     _snapshot_prereqs(core)
-    from agora.contracts import ConversationEpisode
+    from agora.contracts import (
+        ConversationEpisode,
+        EventKind,
+        InboundEvent,
+        RecoveryStatus,
+    )
 
+    # the event is a member of the episode (bead 93h): selection reads
+    # membership, not raw ingestion rows
+    core.put_record(
+        InboundEvent(
+            id="evt:big",
+            revision=1,
+            created_at=ANCHOR,
+            source_event_id="evt:big",
+            journal_seq=1,
+            kind=EventKind.MESSAGE_CREATED,
+            actor_ref=RecordRef(id="principal:agent", revision=1),
+            occurred_at=ANCHOR,
+            ingested_at=ANCHOR,
+            source_audience_ref=_audience_for(core, "room:a"),
+            fragment_refs=(RecordRef(id=big_fragment, revision=1),),
+            reply_target_refs=(),
+            target_refs=(),
+            observed_trigger_refs=(),
+            recovery=RecoveryStatus.COMPLETE,
+        )
+    )
     core.put_record(
         ConversationEpisode(
             id="episode:1",
             revision=1,
             created_at=ANCHOR,
             container_id="room:a",
-            member_event_refs=(),
+            member_event_refs=(RecordRef(id="evt:big", revision=1),),
             reply_edges=(),
             topic_refs=(),
             summary_ref=None,
@@ -857,3 +876,209 @@ def test_correction_invalidates_transitively(tmp_path: Path) -> None:
     invalidated = core.get_record(snapshot.id)
     assert isinstance(invalidated, ContextSnapshot)
     assert invalidated.status.value == "INVALID"
+
+
+def test_episode_selection_discriminates_foreign_episodes(tmp_path: Path) -> None:
+    """Bead 93h two-episode discrimination: fragments ingested under
+    another conversation's episode never enter this turn's snapshot — not
+    its selected fragments, not its producer-coverage inputs, and not
+    propose_memory's acceptable lineage."""
+    from agora.context_memory import MemoryStateError
+    from agora.contracts import ConversationEpisode, RuntimeOrigin
+    from tests.fixtures_review import ReviewStack, feed_event, make_intent
+
+    stack = ReviewStack(tmp_path)
+    feed_event(stack, 1)  # episode:room:public -> fragment:evt:1
+    feed_event(stack, 2)  # episode:room:public -> fragment:evt:2
+    feed_event(stack, 3, episode_id="episode:room:other", container_id="room:other")
+    feed_event(stack, 4, episode_id="episode:room:other", container_id="room:other")
+
+    # membership lives on the episode record, in journal order
+    episode = stack.core.get_record("episode:room:public")
+    assert isinstance(episode, ConversationEpisode)
+    assert [ref.id for ref in episode.member_event_refs] == ["evt:1", "evt:2"]
+
+    episode_ref = stack.core.current_ref("episode:room:public")
+    assert episode_ref is not None
+    snapshot = stack.context_memory.build_snapshot(
+        identity_ref=RecordRef(id=stack.identity.id, revision=1),
+        intent_ref=make_intent(stack, "intent:episode-scope"),
+        audience_ref=RecordRef(id=stack.audience.id, revision=1),
+        episode_ref=episode_ref,
+        sink_ref=stack.sink_ref,
+        effect_capable=True,
+        call_id="snapshot:episode-scope",
+    )
+
+    selected = [ref.id for ref in snapshot.selected_fragment_refs]
+    assert selected == ["fragment:evt:1", "fragment:evt:2"]
+    coverage = stack.core.get_record(snapshot.producer_coverage_ref.id)
+    assert isinstance(coverage, ProducerCoverage)
+    covered = [ref.id for ref in coverage.input_fragment_refs]
+    assert covered == ["fragment:evt:1", "fragment:evt:2"]
+
+    # a foreign fragment cited as memory lineage is a typed hold: it was
+    # never supplied by this turn's runtime context
+    origin = RuntimeOrigin(
+        actor_ref=RecordRef(id="principal:agent", revision=1),
+        work_ref=RecordRef(id="work:episode-scope", revision=1),
+        snapshot_ref=RecordRef(id=snapshot.id, revision=snapshot.revision),
+        trigger_event_refs=(),
+        producer_coverage_ref=snapshot.producer_coverage_ref,
+        runtime_epoch=stack.core.runtime_epoch,
+    )
+    with pytest.raises(MemoryStateError) as excinfo:
+        stack.context_memory.propose_memory(
+            assertion_text="the other room said something",
+            source_refs=(RecordRef(id="fragment:evt:3", revision=1),),
+            requested_stage=MemoryStage.SOCIAL,
+            requested_scope_kind=ScopeKind.ROOM,
+            scope_ref="room:public",
+            existing_memory_ref=None,
+            runtime_origin=origin,
+        )
+    assert excinfo.value.code.value == "INVALID_REFERENCE"
+
+
+def test_event_binding_repairs_on_replayed_duplicate(tmp_path: Path) -> None:
+    """Review findings on bead 93h: an entry ingested before its fragment
+    or episode records exist is not bound (fail-closed — the ingestion row
+    still lands and the cursor still advances), and a crash-replayed
+    duplicate heals the binding, so an event is never permanently outside
+    its episode's context."""
+    from agora.contracts import ConversationEpisode, InboundEvent
+    from agora.stores import JournalEntry
+    from tests.fixtures_review import (
+        ReviewStack,
+        _event_planner,
+        ensure_audience,
+        make_intent,
+    )
+
+    stack = ReviewStack(tmp_path)
+    # mis-ordered fixture: the journal row lands before its fragment exists
+    stack.transport.append_events(
+        (
+            JournalEntry(
+                journal_seq=1,
+                source_event_id="evt:1",
+                source_revision=1,
+                kind="MESSAGE_CREATED",
+                payload_ref="payload:evt:1",
+                fragment_refs=("fragment:evt:1",),
+                recovery="COMPLETE",
+            ),
+        )
+    )
+    episode_id = "episode:repair"
+    planner = _event_planner(
+        episode_id,
+        actor_ref=RecordRef(id="principal:agent", revision=1),
+        source_audience_ref=ensure_audience(stack, "room:public"),
+    )
+    receipt = stack.coordinator.ingest(stack.transport, consumer_id="core-1", event_planner=planner)
+    assert receipt.applied == (1,)  # the row landed; enrichment skipped
+    assert stack.core.get_record("evt:1") is None
+
+    # fixture order corrected after the fact: fragment + episode now exist
+    stack.core.put_payload("payload:evt:1", "hello hermes repaired", owner_ref="evt:1")
+    stack.core.put_record(
+        ContentFragment(
+            id="fragment:evt:1",
+            revision=1,
+            created_at=stack.clock.now_rfc3339(),
+            kind=FragmentKind.TEXT,
+            payload_ref="payload:evt:1",
+            provenance=_plain_provenance_for("principal:agent"),
+            commitment_refs=(),
+            eligibility_status=EligibilityStatus.ACTIVE,
+        )
+    )
+    stack.core.put_record(
+        ConversationEpisode(
+            id=episode_id,
+            revision=1,
+            created_at=stack.clock.now_rfc3339(),
+            container_id="room:public",
+            member_event_refs=(),
+            reply_edges=(),
+            topic_refs=(),
+            summary_ref=None,
+            episode_revision=1,
+            pending_intent_refs=(),
+        )
+    )
+
+    # crash-replay: the entry returns as a duplicate and the binding heals
+    stack.core._conn.execute("UPDATE core_meta SET value = 0 WHERE key = 'cursor'")
+    replay = stack.coordinator.ingest(stack.transport, consumer_id="core-1", event_planner=planner)
+    assert replay.duplicates == (1,)
+    assert isinstance(stack.core.get_record("evt:1"), InboundEvent)
+    episode = stack.core.get_record(episode_id)
+    assert isinstance(episode, ConversationEpisode)
+    assert [ref.id for ref in episode.member_event_refs] == ["evt:1"]
+
+    episode_ref = stack.core.current_ref(episode_id)
+    assert episode_ref is not None
+    snapshot = stack.context_memory.build_snapshot(
+        identity_ref=RecordRef(id=stack.identity.id, revision=1),
+        intent_ref=make_intent(stack, "intent:repair"),
+        audience_ref=RecordRef(id=stack.audience.id, revision=1),
+        episode_ref=episode_ref,
+        sink_ref=stack.sink_ref,
+        effect_capable=True,
+        call_id="snapshot:repair",
+    )
+    assert "fragment:evt:1" in [ref.id for ref in snapshot.selected_fragment_refs]
+
+
+def test_gap_rows_never_become_episode_members(tmp_path: Path) -> None:
+    """Review finding on bead 93h: GAP-recovery rows are transport
+    bookkeeping — even a planner that binds everything cannot make a gap
+    marker an episode member or an InboundEvent."""
+    from agora.contracts import ConversationEpisode
+    from agora.stores import JournalEntry
+    from tests.fixtures_review import ReviewStack, _event_planner, ensure_audience
+
+    stack = ReviewStack(tmp_path)
+    stack.core.put_record(
+        ConversationEpisode(
+            id="episode:gaps",
+            revision=1,
+            created_at=stack.clock.now_rfc3339(),
+            container_id="room:public",
+            member_event_refs=(),
+            reply_edges=(),
+            topic_refs=(),
+            summary_ref=None,
+            episode_revision=1,
+            pending_intent_refs=(),
+        )
+    )
+    stack.transport.append_events(
+        (
+            JournalEntry(
+                journal_seq=1,
+                source_event_id="gap:1",
+                source_revision=1,
+                kind="CONNECTION_GAP",
+                payload_ref="",
+                fragment_refs=(),
+                recovery="GAP",
+            ),
+        )
+    )
+    receipt = stack.coordinator.ingest(
+        stack.transport,
+        consumer_id="core-1",
+        event_planner=_event_planner(
+            "episode:gaps",
+            actor_ref=RecordRef(id="principal:agent", revision=1),
+            source_audience_ref=ensure_audience(stack, "room:public"),
+        ),
+    )
+    assert receipt.applied == (1,)  # bookkeeping still lands and advances
+    assert stack.core.get_record("gap:1") is None
+    episode = stack.core.get_record("episode:gaps")
+    assert isinstance(episode, ConversationEpisode)
+    assert episode.member_event_refs == ()

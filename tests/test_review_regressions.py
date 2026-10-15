@@ -459,11 +459,13 @@ def test_identical_reproposals_are_idempotent(tmp_path: Path) -> None:
     feed_event(stack)
     work_id = stack.coordinator.ready_work_ids()[0]
     episode_fragment = RecordRef(id="fragment:evt:1", revision=1)
+    episode_ref = stack.core.current_ref("episode:room:public")
+    assert episode_ref is not None  # membership appends bump the episode revision
     snapshot = stack.context_memory.build_snapshot(
         identity_ref=RecordRef(id=stack.identity.id, revision=1),
         intent_ref=make_intent(stack, "intent:idem"),
         audience_ref=RecordRef(id=stack.audience.id, revision=1),
-        episode_ref=RecordRef(id="episode:room:public", revision=1),
+        episode_ref=episode_ref,
         sink_ref=stack.sink_ref,
         effect_capable=True,
         call_id="idem",

@@ -33,7 +33,7 @@ Dates and release numbers should follow demonstrated capability. Architecture re
 | M6 — Autonomous live participation | Agent speaks, reacts, initiates and stays quiet within standing capabilities | M4 + M5 | Bounded live operation preserves identity, discretion and delivery rules |
 | M7 — Measured improvements and broader environments | Better economics, memory and capabilities where justified | Relevant earlier milestone | Each addition has its own contract, usefulness evidence and regression coverage |
 
-M0–M3 together define the first implementation phase. The immediate deliverable is M0 plus the smallest runnable M1 whole-turn replay. M4 tests whether the architecture remains useful with real inference. M5–M6 provide the actual social presence. M7 is an extension lane, not a requirement to postpone ordinary participation indefinitely.
+M0–M3 together define the first implementation phase. The immediate deliverable is the M3 dispatch and recovery work that completes the slice. M4 tests whether the architecture remains useful with real inference. M5–M6 provide the actual social presence. M7 is an extension lane, not a requirement to postpone ordinary participation indefinitely.
 
 ## M0 — Implementation foundation
 
@@ -152,4 +152,4 @@ The coding session must not guess real confidentiality norms, unknown joint-auth
 
 Acceptance reports should separate code invariants, model-backed observations and live platform limitations. Later scope changes require a current implementation note or architecture revision, with Beads dependencies and applicable OpenSpec requirements updated. Historical v0.1/v0.2 files remain reference evidence.
 
-M0 and M1 are complete. The next concrete deliverable is M2 (views and discretion: authority evaluation, scoped memory, the two fixed transforms, and NONE/ADVISORY/REQUIRED/HARD_DENY routing), followed by the M3 dispatch and recovery work needed to finish the synthetic slice. The objective is unchanged: a continuous agent that can know things, exercise discretion and still choose to participate naturally.
+M0, M1 and M2 are complete. The next concrete deliverable is M3 (dispatch and recovery: pre-dispatch revalidation, acknowledged supersession, release limits, restart-safe replay and the I01–I16 acceptance battery), which finishes the synthetic slice. The objective is unchanged: a continuous agent that can know things, exercise discretion and still choose to participate naturally.

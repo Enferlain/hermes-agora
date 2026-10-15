@@ -322,3 +322,41 @@ def test_crash_between_model_and_accept_recovers_deterministically(tmp_path: Pat
     final_work = core2.get_work(work_id)
     assert final_work is not None and final_work["main_steps_used"] == 1
     assert transport2.outbox_state(f"{work_id}:effect:0") == "SENT"
+
+
+def test_reaction_to_purged_target_payload_is_a_typed_hold(tmp_path: Path) -> None:
+    """The reaction's content digest binds real target bytes (bead
+    hermes-agora-ecy): a purged target payload cannot be digested, so the
+    turn holds with INVALID_REFERENCE — never a placeholder digest and
+    never a dispatched reaction."""
+    from agora.contracts import Disposition, ModelEffectDraft, ModelSubmitPlanStep
+
+    step = ModelSubmitPlanStep(
+        kind=MainStepKind.SUBMIT_PLAN,
+        intent_ref=RecordRef(id="intent:turn:work:turn:evt:1", revision=1),
+        disposition=Disposition.ACT,
+        effects=(
+            ModelEffectDraft(
+                kind=EffectKind.ADD_REACTION,
+                destination_id="room:public",
+                text=None,
+                target_ref=RecordRef(id="fragment:evt:1", revision=1),
+                emoji="👋",
+            ),
+        ),
+        declared_fact_refs=(),
+    )
+    stack = Stack(tmp_path, [step])
+    feed_event(stack)
+    stack.core._conn.execute(
+        "UPDATE core_payloads SET status = 'PURGED' WHERE payload_id = 'payload:evt:1'"
+    )
+    work_id = stack.coordinator.ready_work_ids()[0]
+    result = stack.coordinator.run_turn(work_id)
+    assert result.outcome.kind == OutcomeKind.HELD
+    assert "INVALID_REFERENCE" in [code.value for code in result.outcome.reason_codes]
+    # nothing written past the denial: no effect, plan, outbox, or world rows
+    assert stack.core.get_record(f"{work_id}:effect:0") is None
+    assert stack.core.get_record(f"plan:{work_id}:1") is None
+    assert stack.transport._conn.execute("SELECT count(*) FROM transport_outbox").fetchone()[0] == 0
+    assert stack.world._conn.execute("SELECT count(*) FROM world_effects").fetchone()[0] == 0

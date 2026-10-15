@@ -4,6 +4,7 @@ action, and timer-driven voluntary initiation."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -79,6 +80,11 @@ def test_reaction_outcome_renders_exact_shape(tmp_path: Path) -> None:
     assert '"kind":"ADD_REACTION"' in world_bytes
     assert '"emoji":"🌊"' in world_bytes
     assert '"target_ref":{"id":"fragment:evt:greeting","revision":1}' in world_bytes
+    # the content digest binds the target's real payload bytes (bead
+    # hermes-agora-ecy), never the placeholder zeros
+    expected_digest = hashlib.sha256(b"hermes, look at this project note").hexdigest()
+    assert f'"target_content_digest":"{expected_digest}"' in world_bytes
+    assert f'"target_content_digest":"{"0" * 64}"' not in world_bytes
 
 
 def test_timer_driven_voluntary_initiation(tmp_path: Path) -> None:

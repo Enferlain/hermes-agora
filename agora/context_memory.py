@@ -36,6 +36,7 @@ from agora.contracts import (
     CommitmentStrength,
     ContentFragment,
     ContextSnapshot,
+    ConversationEpisode,
     DependencyKind,
     Derivation,
     DerivationState,
@@ -43,6 +44,7 @@ from agora.contracts import (
     EnvelopePurpose,
     ExposureClass,
     FragmentKind,
+    InboundEvent,
     InstructionAuthority,
     Integrity,
     IntendedUse,
@@ -826,20 +828,27 @@ class ContextMemory:
     def eligible_episode_fragments(
         self, episode_ref: RecordRef
     ) -> tuple[tuple[RecordRef, ...], int]:
-        """Recent ingested fragments for an episode, newest last, and the
-        bytes they consumed — the budget is SHARED with memory fragments
-        (handoff §6.4: one 16 KiB serialized social-content limit)."""
-        rows = self.core._conn.execute(
-            "SELECT fragment_refs FROM core_ingestion ORDER BY journal_seq DESC LIMIT ?",
-            (MAX_SELECTED_EVENTS,),
-        ).fetchall()
+        """Fragments of the episode's member events, newest last, and the
+        bytes they consumed. Membership lives on
+        ``ConversationEpisode.member_event_refs`` (handoff §5), maintained
+        at ingest — members confer no scope rights, they only narrow
+        context, so a foreign episode's fragments can never enter this
+        snapshot. The episode is read at its pinned revision (as-of-turn
+        membership); append order is journal order, so the newest
+        MAX_SELECTED_EVENTS members are the episode's latest events, and
+        the budget is SHARED with memory fragments (handoff §6.4: one
+        16 KiB serialized social-content limit)."""
+        episode = self.core.get_record(episode_ref.id, episode_ref.revision)
+        if not isinstance(episode, ConversationEpisode):
+            return (), 0
+        members = episode.member_event_refs[-MAX_SELECTED_EVENTS:]
         selected: list[RecordRef] = []
         total = 0
-        for row in rows:
-            for fragment_id in json.loads(row["fragment_refs"]):
-                ref = self.core.current_ref(fragment_id)
-                if ref is None:
-                    continue
+        for member in reversed(members):
+            event_record = self.core.get_record(member.id, member.revision)
+            if not isinstance(event_record, InboundEvent):
+                continue
+            for ref in event_record.fragment_refs:
                 fragment_record = self.core.get_record(ref.id, ref.revision)
                 if not isinstance(fragment_record, ContentFragment):
                     continue

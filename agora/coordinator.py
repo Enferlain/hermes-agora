@@ -9,6 +9,7 @@ directly. Scripted participation makes silence explicit.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Any
 
@@ -233,6 +234,7 @@ class Coordinator:
         *,
         consumer_id: str,
         planner: Any = None,
+        event_planner: Any = None,
     ) -> IngestReceipt:
         receipt = ingest_batch(
             self.core,
@@ -241,6 +243,7 @@ class Coordinator:
             ingested_at=self.clock.now_rfc3339(),
             injector=self.injector,
             planner=planner,
+            event_planner=event_planner,
         )
         return receipt
 
@@ -801,9 +804,29 @@ class Coordinator:
         return render_add_reaction(
             destination_id=draft.destination_id,
             target_ref=draft.target_ref,
-            target_content_digest="0" * 64,
+            target_content_digest=self._target_content_digest(draft.target_ref),
             emoji=draft.emoji or "🙂",
         )
+
+    def _target_content_digest(self, target_ref: RecordRef) -> str:
+        """Content digest of the reaction target (handoff §4.3: a reaction
+        requires target message revision/content digest) — the target
+        fragment's own payload bytes at the cited revision, so the rendered
+        bytes bind exactly the content being reacted to and dispatch-time
+        TARGET_CHANGED revalidation compares what was rendered. A missing
+        fragment or a purged payload is a typed rejection, never a
+        placeholder digest."""
+        fragment = self.core.get_record(target_ref.id, target_ref.revision)
+        if not isinstance(fragment, ContentFragment):
+            raise PlanRejected(
+                ReasonCode.INVALID_REFERENCE, "reaction target is not a content fragment"
+            )
+        data = self.core.get_payload(fragment.payload_ref)
+        if data is None:
+            raise PlanRejected(
+                ReasonCode.INVALID_REFERENCE, "reaction target payload is missing or purged"
+            )
+        return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
     def _defer_intent(self, work_id: str, intent_ref: RecordRef) -> None:
         """Persist a deferred intent with an explicit due condition (fixed
