@@ -887,6 +887,84 @@ class CoreStore(_Domain):
                 runtime_epoch=runtime_epoch,
             )
 
+    # -- release reservations (M3 D4 / I15) ----------------------------------
+
+    def _reserve_release_tx(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        effect_id: str,
+        constraint_group_id: str,
+        query_key: str,
+        units: int,
+        limit: int,
+    ) -> bool:
+        """Check-and-reserve one effect's release allowance inside the
+        caller's BEGIN IMMEDIATE transaction (D4): SUM(accounting_units)
+        over spending rows for the same constraint group and window
+        query_key, inserting this effect's row only when the sum stays
+        within the fixture limit. Idempotent per effect — an existing row
+        for (effect_id, constraint_group_id) means the allowance is
+        already held, so a retry re-enters without spending twice."""
+        existing = connection.execute(
+            "SELECT state FROM core_release_reservations"
+            " WHERE effect_id = ? AND constraint_group_id = ?",
+            (effect_id, constraint_group_id),
+        ).fetchone()
+        if existing is not None and existing["state"] in (
+            "RESERVED",
+            "COMMITTED",
+            "POSSIBLY_COMMITTED",
+        ):
+            return True  # allowance already held; a retry re-enters without spending twice
+        spent = connection.execute(
+            "SELECT COALESCE(SUM(accounting_units), 0) FROM core_release_reservations"
+            " WHERE constraint_group_id = ? AND query_key = ?"
+            " AND state IN ('RESERVED', 'COMMITTED', 'POSSIBLY_COMMITTED')",
+            (constraint_group_id, query_key),
+        ).fetchone()[0]
+        if spent + units > limit:
+            return False
+        if existing is not None:
+            # a superseded revision released its unspent allowance; the
+            # replacement spends fresh, reactivated in the current window
+            connection.execute(
+                "UPDATE core_release_reservations SET state = 'RESERVED', query_key = ?"
+                " WHERE effect_id = ? AND constraint_group_id = ?",
+                (query_key, effect_id, constraint_group_id),
+            )
+            return True
+        connection.execute(
+            "INSERT INTO core_release_reservations (reservation_id, effect_id,"
+            " constraint_group_id, query_key, state, accounting_units)"
+            " VALUES (?, ?, ?, ?, 'RESERVED', ?)",
+            (
+                f"release:{effect_id}:{constraint_group_id}",
+                effect_id,
+                constraint_group_id,
+                query_key,
+                units,
+            ),
+        )
+        return True
+
+    def settle_release(self, effect_id: str, state: str) -> None:
+        """Settle an effect's RESERVED rows to the addendum's terminal
+        states: COMMITTED on confirmed delivery, POSSIBLY_COMMITTED on
+        UNKNOWN (never auto-refunded), CANCELLED_BEFORE_DISPATCH on
+        acknowledged pre-dispatch cancellation. A confirmed-no-effect
+        failure keeps its allowance spent (the attempt consumed the
+        window slot; the single retry rides the same reservation)."""
+        allowed = {"COMMITTED", "POSSIBLY_COMMITTED", "CANCELLED_BEFORE_DISPATCH"}
+        if state not in allowed:
+            raise StoreError(f"unknown release settlement state {state}")
+        with _tx(self._conn):
+            self._conn.execute(
+                "UPDATE core_release_reservations SET state = ? WHERE effect_id = ?"
+                " AND state = 'RESERVED'",
+                (state, effect_id),
+            )
+
     def _create_work_tx(
         self,
         connection: sqlite3.Connection,
@@ -1200,7 +1278,14 @@ class TransportStore(_Domain):
             ("HELD", "CANCELLED"),
             ("DISPATCH_STARTED", "SENT"),
             ("DISPATCH_STARTED", "FAILED_CONFIRMED"),
+            # also restart recovery: a crash past the linearization point
+            # with indeterminate world evidence resolves conservatively
             ("DISPATCH_STARTED", "UNKNOWN"),
+            # §6.2 reconciliation: only positive world evidence resolves
+            # UNKNOWN — APPLIED to SENT, CERTIFIED_NOT_APPLIED to
+            # FAILED_CONFIRMED; INDETERMINATE never transitions.
+            ("UNKNOWN", "SENT"),
+            ("UNKNOWN", "FAILED_CONFIRMED"),
             # §6.2: the single retry path, gated on evidence of no effect plus
             # fresh checks and a new attempt id at dispatch time.
             ("FAILED_CONFIRMED", "QUEUED"),

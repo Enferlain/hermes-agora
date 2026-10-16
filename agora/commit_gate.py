@@ -106,6 +106,11 @@ class _Routing:
     route: ReviewRoute
     relevant_commitments: tuple[Commitment, ...]
     policy_refs: tuple[RecordRef, ...]
+    # Routing result != routing evidence (M3 D1): every commitment/policy
+    # revision the walk consulted, regardless of route, so the
+    # authorization binds what the verdict was derived from and
+    # dispatch-time POLICY_CHANGED revalidation checks the evidence.
+    consulted_policy_vector: tuple[RecordRef, ...] = ()
 
 
 class CommitGate:
@@ -173,7 +178,6 @@ class CommitGate:
         # ACT with exactly one effect (record validation guarantees the
         # count); the route protocol above gated this path.
         effect = plan.effects[0]
-        snapshot = self._snapshot(plan)
         authorization = CommitAuthorization(
             id=f"auth:{effect.logical_effect_id}:{plan.proposal_revision}",
             revision=1,
@@ -189,7 +193,11 @@ class CommitGate:
             authority_version_vector=(
                 RecordRef(id=context.capability.id, revision=context.capability.revision),
             ),
-            policy_version_vector=snapshot.version_vector if snapshot else (),
+            # M3 D1: the field means what its name says — every
+            # policy/commitment revision routing consulted for this plan,
+            # not the snapshot's fragment vector (snapshot freshness is
+            # revalidated through the snapshot binding, its own input)
+            policy_version_vector=routing.consulted_policy_vector,
             runtime_epoch=self.core.runtime_epoch,
             capability_ref=RecordRef(
                 id=context.capability.id, revision=context.capability.revision
@@ -211,24 +219,44 @@ class CommitGate:
         snapshot, the plan's runtime producer coverage, or the derived
         intent (QUIET/DEFER included — the resolution is what gets
         reviewed); ADVISORY for fixture-configured ordinary concerns on ACT
-        plans; NONE otherwise."""
-        restricting = self._restricting_commitments(plan)
+        plans; NONE otherwise. The consulted policy vector travels with
+        every route: a NONE/ADVISORY verdict is itself derived from state
+        that can go stale between authorization and dispatch."""
+        restricting, consulted = self._restricting_commitments(plan)
+        consulted_vector = _version_vector(
+            (RecordRef(id=commitment.id, revision=commitment.revision) for commitment in consulted),
+            self._policy_refs(consulted),
+        )
         if restricting:
             return _Routing(
                 route=ReviewRoute.REQUIRED,
                 relevant_commitments=restricting,
                 policy_refs=self._policy_refs(restricting),
+                consulted_policy_vector=consulted_vector,
             )
         if self.advisory_concerns and plan.disposition == Disposition.ACT:
-            return _Routing(route=ReviewRoute.ADVISORY, relevant_commitments=(), policy_refs=())
-        return _Routing(route=ReviewRoute.NONE, relevant_commitments=(), policy_refs=())
+            return _Routing(
+                route=ReviewRoute.ADVISORY,
+                relevant_commitments=(),
+                policy_refs=(),
+                consulted_policy_vector=consulted_vector,
+            )
+        return _Routing(
+            route=ReviewRoute.NONE,
+            relevant_commitments=(),
+            policy_refs=(),
+            consulted_policy_vector=consulted_vector,
+        )
 
-    def _restricting_commitments(self, plan: EffectPlan) -> tuple[Commitment, ...]:
-        """Active STRONG commitments reachable from the plan whose use flags
-        restrict expression or observable influence — exactly the §8
-        condition 'requires expression/observable-use resolution'. A STRONG
-        commitment allowing both dimensions does not force review, and
-        ORDINARY_DISCRETION never does. Routing reads these facts only;
+    def _restricting_commitments(
+        self, plan: EffectPlan
+    ) -> tuple[tuple[Commitment, ...], tuple[Commitment, ...]]:
+        """All commitments the routing walk consulted, and the subset that
+        restricts: active STRONG commitments reachable from the plan whose
+        use flags restrict expression or observable influence — exactly the
+        §8 condition 'requires expression/observable-use resolution'. A
+        STRONG commitment allowing both dimensions does not force review,
+        and ORDINARY_DISCRETION never does. Routing reads these facts only;
         sensor scores have no path here."""
         found: dict[str, RecordRef] = {}
         snapshot = self._snapshot(plan)
@@ -271,7 +299,10 @@ class CommitGate:
             )
             if isinstance(commitment, Commitment)
         ]
-        return tuple(commitment for commitment in commitments if _restricts(commitment))
+        return (
+            tuple(commitment for commitment in commitments if _restricts(commitment)),
+            tuple(commitments),
+        )
 
     def _collect(self, refs: Iterable[RecordRef], into: dict[str, RecordRef]) -> None:
         for ref in refs:

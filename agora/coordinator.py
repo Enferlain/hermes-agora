@@ -73,7 +73,7 @@ from agora.contracts import (
     render_add_reaction,
     render_send_message,
 )
-from agora.fake_sidecar import FakeSidecar
+from agora.fake_sidecar import FakeSidecar, SidecarError
 from agora.ports import CrashCheckpoint, FaultInjector, MainModelPort, VirtualClock
 from agora.stores import (
     CoreStore,
@@ -641,10 +641,32 @@ class Coordinator:
                 decision.authorization_ref.id, decision.authorization_ref.revision
             )
             assert isinstance(authorization, CommitAuthorization)
-            receipt = self.sidecar.submit_authorized(
-                authorization, effects[0], rendered_payload=self._render(step.effects[0])
-            )
-            receipt_ref = RecordRef(id=receipt.id, revision=receipt.revision)
+            try:
+                receipt = self.sidecar.submit_authorized(
+                    authorization,
+                    effects[0],
+                    rendered_payload=self._render(step.effects[0]),
+                    snapshot_ref=RecordRef(id=snapshot.id, revision=snapshot.revision),
+                )
+            except SidecarError as error:
+                # Dispatch-time prevention (M3 D1) is part of the commit
+                # path: the outbox row is durably HELD with the typed code
+                # and the turn surfaces it like any other hold — the
+                # bounded rewrite loop may still offer a replacement, and
+                # for a TOO_LATE supersession refusal the earlier
+                # revision's receipt stands.
+                decision = CommitDecision(
+                    id=f"decision:dispatch:{work_id}:{proposal_revision}",
+                    revision=1,
+                    created_at=self.clock.now_rfc3339(),
+                    kind=DecisionKind.HOLD,
+                    reason_codes=(error.code,),
+                    authorization_ref=decision.authorization_ref,
+                    assessment_ref=None,
+                )
+                self.core.put_record(decision)
+            else:
+                receipt_ref = RecordRef(id=receipt.id, revision=receipt.revision)
         return decision, receipt_ref, refs
 
     def _validate_model_refs(self, step: ModelSubmitPlanStep) -> None:
