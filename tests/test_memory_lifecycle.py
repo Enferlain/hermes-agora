@@ -1082,3 +1082,128 @@ def test_gap_rows_never_become_episode_members(tmp_path: Path) -> None:
     episode = stack.core.get_record("episode:gaps")
     assert isinstance(episode, ConversationEpisode)
     assert episode.member_event_refs == ()
+
+
+def test_membership_follows_event_revisions_in_place(tmp_path: Path) -> None:
+    """Bead sq5: a same source_event_id at a new source_revision
+    (MESSAGE_UPDATED / MESSAGE_DELETED) is the same member followed at its
+    current revision — conversational position kept, episode record
+    revision bumped — so new turns resolve edited content, snapshots that
+    pinned the episode earlier keep their as-of-turn view, and a deleted
+    event is a tombstone contributing nothing."""
+    from agora.contracts import ConversationEpisode
+    from agora.stores import JournalEntry
+    from tests.fixtures_review import ReviewStack, _event_planner, ensure_audience, make_intent
+
+    stack = ReviewStack(tmp_path)
+    episode_id = "episode:edits"
+    stack.core.put_record(
+        ConversationEpisode(
+            id=episode_id,
+            revision=1,
+            created_at=stack.clock.now_rfc3339(),
+            container_id="room:public",
+            member_event_refs=(),
+            reply_edges=(),
+            topic_refs=(),
+            summary_ref=None,
+            episode_revision=1,
+            pending_intent_refs=(),
+        )
+    )
+    planner = _event_planner(
+        episode_id,
+        actor_ref=RecordRef(id="principal:agent", revision=1),
+        source_audience_ref=ensure_audience(stack, "room:public"),
+    )
+
+    def feed(seq: int, event_id: str, revision: int, kind: str, fragment_id: str) -> None:
+        if stack.core.current_ref(fragment_id) is None:
+            stack.core.put_payload(
+                f"payload:{fragment_id}", f"content {fragment_id}", owner_ref=event_id
+            )
+            stack.core.put_record(
+                ContentFragment(
+                    id=fragment_id,
+                    revision=1,
+                    created_at=stack.clock.now_rfc3339(),
+                    kind=FragmentKind.TEXT,
+                    payload_ref=f"payload:{fragment_id}",
+                    provenance=_plain_provenance_for("principal:agent"),
+                    commitment_refs=(),
+                    eligibility_status=EligibilityStatus.ACTIVE,
+                )
+            )
+        stack.transport.append_events(
+            (
+                JournalEntry(
+                    journal_seq=seq,
+                    source_event_id=event_id,
+                    source_revision=revision,
+                    kind=kind,
+                    payload_ref=f"payload:{fragment_id}",
+                    fragment_refs=(fragment_id,) if fragment_id else (),
+                    recovery="COMPLETE",
+                ),
+            )
+        )
+        stack.coordinator.ingest(stack.transport, consumer_id="core-1", event_planner=planner)
+
+    feed(1, "evt:1", 1, "MESSAGE_CREATED", "fragment:evt:1:v1")
+    feed(2, "evt:2", 1, "MESSAGE_CREATED", "fragment:evt:2")
+    pre_edit = stack.core.current_ref(episode_id)
+    assert pre_edit is not None
+
+    # the edit: same event id, upstream revision 2, new content
+    feed(3, "evt:1", 2, "MESSAGE_UPDATED", "fragment:evt:1:v2")
+
+    episode = stack.core.get_record(episode_id)
+    assert isinstance(episode, ConversationEpisode)
+    assert [(ref.id, ref.revision) for ref in episode.member_event_refs] == [
+        ("evt:1", 2),
+        ("evt:2", 1),
+    ]  # followed in place: position kept, revision current
+
+    def snapshot_for(ref: RecordRef, call_id: str):
+        return stack.context_memory.build_snapshot(
+            identity_ref=RecordRef(id=stack.identity.id, revision=1),
+            intent_ref=make_intent(stack, f"intent:{call_id}"),
+            audience_ref=RecordRef(id=stack.audience.id, revision=1),
+            episode_ref=ref,
+            sink_ref=stack.sink_ref,
+            effect_capable=True,
+            call_id=f"snapshot:{call_id}",
+        )
+
+    current_episode = stack.core.current_ref(episode_id)
+    assert current_episode is not None
+    current = snapshot_for(current_episode, "edit-current")
+    assert [ref.id for ref in current.selected_fragment_refs] == [
+        "fragment:evt:1:v2",
+        "fragment:evt:2",
+    ]
+    pinned = snapshot_for(pre_edit, "edit-pinned")
+    assert [ref.id for ref in pinned.selected_fragment_refs] == [
+        "fragment:evt:1:v1",
+        "fragment:evt:2",
+    ]  # as-of-turn: the pre-edit episode revision still shows v1
+
+    # the delete: same event id, revision 3, no fragments — a tombstone
+    stack.transport.append_events(
+        (
+            JournalEntry(
+                journal_seq=4,
+                source_event_id="evt:2",
+                source_revision=2,
+                kind="MESSAGE_DELETED",
+                payload_ref="",
+                fragment_refs=(),
+                recovery="COMPLETE",
+            ),
+        )
+    )
+    stack.coordinator.ingest(stack.transport, consumer_id="core-1", event_planner=planner)
+    post_delete_episode = stack.core.current_ref(episode_id)
+    assert post_delete_episode is not None
+    after_delete = snapshot_for(post_delete_episode, "delete-current")
+    assert [ref.id for ref in after_delete.selected_fragment_refs] == ["fragment:evt:1:v2"]

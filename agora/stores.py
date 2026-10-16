@@ -1296,12 +1296,14 @@ def _bind_event_tx(
     bound: list[Record],
 ) -> None:
     """Bind one journal entry to its episode inside the caller's
-    transaction: create the ``InboundEvent`` record when absent, then
-    append it to the episode's membership when the episode record exists.
-    Every step is idempotent, so newly applied entries and crash-replayed
-    duplicates take the same path — a replay repairs a first pass whose
-    episode or fragment records had not been seeded yet, instead of
-    leaving the event permanently outside its episode's context.
+    transaction: create the ``InboundEvent`` record when absent, then add
+    it to the episode's membership when the episode record exists —
+    appended on first sight, followed in place (same position, current
+    revision) when the event's upstream revision changes. Every step is
+    idempotent, so newly applied entries and crash-replayed duplicates
+    take the same path — a replay repairs a first pass whose episode or
+    fragment records had not been seeded yet, instead of leaving the
+    event permanently outside its episode's context.
 
     Fail-closed rules: GAP-recovery rows are transport bookkeeping, never
     members; an entry citing a fragment with no core record gets no
@@ -1338,12 +1340,25 @@ def _bind_event_tx(
     if not isinstance(episode, ConversationEpisode):
         return
     event_ref = RecordRef(id=entry.source_event_id, revision=entry.source_revision)
-    if any(ref.id == event_ref.id for ref in episode.member_event_refs):
-        return
+    members = episode.member_event_refs
+    updated_members: tuple[RecordRef, ...] | None = None
+    for index, ref in enumerate(members):
+        if ref.id == event_ref.id:
+            if ref.revision == event_ref.revision:
+                return  # true duplicate: the member is already current
+            # the event's upstream revision changed (MESSAGE_UPDATED /
+            # MESSAGE_DELETED): follow it in place — same conversational
+            # position, current revision — so later turns resolve the
+            # edited (or tombstoned) content while snapshots that pinned
+            # the episode earlier keep their as-of-turn view
+            updated_members = (*members[:index], event_ref, *members[index + 1 :])
+            break
+    if updated_members is None:
+        updated_members = (*members, event_ref)
     updated = replace(
         episode,
         revision=episode.revision + 1,
-        member_event_refs=(*episode.member_event_refs, event_ref),
+        member_event_refs=updated_members,
     )
     core._put_record_tx(connection, updated)
     # the episode revision is verified like any other record write, so the
