@@ -875,6 +875,64 @@ class ContextMemory:
             self.core._verify_ref_targets_tx(connection, tuple(written))
         return RecordRef(id=corrected.id, revision=corrected.revision)
 
+    def revoke_view(self, view_ref: RecordRef) -> RecordRef:
+        """I14: revoking a view invalidates every active snapshot that
+        admitted it — revocation is not limited to retrieval-time
+        eligibility, so a queued effect derived through the view can never
+        pass revalidation on a stale admission. The dependency edges
+        build_snapshot writes make the dependents findable; the snapshot's
+        own active_view_refs decide the match (the version vector cites
+        fragments, not views). The revocation and its invalidation walk
+        are ONE core transaction, mirroring correct_memory: a crash
+        (DURING_CORRECTION_JOB — the invalidation-job boundary) rolls back
+        to the pre-revocation state and the revocation re-runs."""
+        current = self.core.current_ref(view_ref.id)
+        if current is None:
+            raise MemoryStateError(
+                ReasonCode.INVALID_REFERENCE, f"view {view_ref.id} does not exist"
+            )
+        view = self.core.get_record(view_ref.id, current.revision)
+        if not isinstance(view, MemoryView):
+            raise MemoryStateError(
+                ReasonCode.INVALID_REFERENCE, f"{view_ref.id} is not a memory view"
+            )
+        if view.status == RecordStatus.REVOKED:
+            # Deliberately NOT a SUPERSEDED guard: views are born at
+            # revision 1 and revocation is the only revision bump, so a
+            # stale cite can only mean "already revoked" — returning the
+            # standing revocation is exactly the crash-retry idempotence
+            # this path needs (unlike memories, which correct_memory
+            # guards because promotions move them forward).
+            return current
+        now = self.clock.now_rfc3339()
+        written: list[Record] = []
+        with self.core.transaction() as connection:
+            revoked = replace(
+                view, revision=view.revision + 1, created_at=now, status=RecordStatus.REVOKED
+            )
+            self.core._put_record_tx(connection, revoked)
+            written.append(revoked)
+            self._trip(CrashCheckpoint.DURING_CORRECTION_JOB)
+            for child_id in self.core.children_of(view.id):
+                record = self.core.get_record(child_id)
+                if not isinstance(record, ContextSnapshot):
+                    continue
+                if not any(ref.id == view.id for ref in record.active_view_refs):
+                    continue
+                # no INVALID-status guard, matching _invalidate_from's
+                # snapshot branch: re-flipping an already-invalid snapshot
+                # only churns a revision and can never reopen dispatch
+                invalid = replace(
+                    record,
+                    revision=record.revision + 1,
+                    created_at=now,
+                    status=SnapshotStatus.INVALID,
+                )
+                self.core._put_record_tx(connection, invalid)
+                written.append(invalid)
+            self.core._verify_ref_targets_tx(connection, tuple(written))
+        return RecordRef(id=revoked.id, revision=revoked.revision)
+
     def _current_memory_or_error(self, memory_ref: RecordRef) -> MemoryRecord:
         current = self.core.current_ref(memory_ref.id)
         if current is None:

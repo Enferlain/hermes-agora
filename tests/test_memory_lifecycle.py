@@ -1207,3 +1207,99 @@ def test_membership_follows_event_revisions_in_place(tmp_path: Path) -> None:
     assert post_delete_episode is not None
     after_delete = snapshot_for(post_delete_episode, "delete-current")
     assert [ref.id for ref in after_delete.selected_fragment_refs] == ["fragment:evt:1:v2"]
+
+
+def test_view_revocation_invalidates_admitting_snapshots(tmp_path: Path) -> None:
+    """Bead l34 / I14: revoking a view invalidates every active snapshot
+    that admitted it (revocation is not limited to retrieval-time
+    eligibility), idempotently, in one transaction."""
+    from agora.contracts import ContextSnapshot, DependencyKind, MemoryView, RecordStatus
+    from tests.fixtures_review import (
+        ReviewStack,
+        comparison_view,
+        feed_event,
+        make_intent,
+        review_snapshot,
+        seed_five_classes,
+    )
+
+    stack = ReviewStack(tmp_path)
+    seed_five_classes(stack)  # use:finance-fields backs the view
+    intent = make_intent(stack, "intent:revoke")
+    feed_event(stack)  # fragment:evt:1 behind the view
+    view = comparison_view(
+        stack,
+        "view:revoked",
+        call_id="call:revoke",
+        fragment_ref=RecordRef(id="fragment:evt:1", revision=1),
+        authorization_id="use:finance-fields",
+    )
+    snapshot = review_snapshot(stack, "call:revoke", intent, views=(view,))
+    # the dependency edge production build_snapshot writes for admitted
+    # views — the revocation walk follows exactly this edge
+    stack.core.add_dependency(
+        RecordRef(id=snapshot.id, revision=snapshot.revision),
+        RecordRef(id=view.id, revision=view.revision),
+        DependencyKind.PRODUCER_INPUT,
+    )
+    revoked_ref = stack.context_memory.revoke_view(RecordRef(id=view.id, revision=1))
+    view_record = stack.core.get_record(revoked_ref.id, revoked_ref.revision)
+    assert isinstance(view_record, MemoryView) and view_record.status == RecordStatus.REVOKED
+    invalidated = stack.core.get_record(snapshot.id)
+    assert isinstance(invalidated, ContextSnapshot)
+    assert invalidated.status.value == "INVALID"
+    # idempotent: revoking again returns the standing revocation
+    again = stack.context_memory.revoke_view(revoked_ref)
+    assert again == revoked_ref
+
+
+def test_revocation_crash_rolls_back_and_retries(tmp_path: Path) -> None:
+    """The revocation's crash-rollback claim is pinned: a crash inside the
+    invalidation-job boundary leaves the view active and the snapshots
+    untouched, and the revocation re-runs cleanly."""
+    from agora.contracts import ContextSnapshot, DependencyKind, MemoryView, RecordStatus
+    from agora.ports import CrashCheckpoint, InjectedCrash
+    from tests.fixtures_review import (
+        ReviewStack,
+        comparison_view,
+        feed_event,
+        make_intent,
+        review_snapshot,
+        seed_five_classes,
+    )
+
+    stack = ReviewStack(tmp_path)
+    seed_five_classes(stack)
+    feed_event(stack)
+    intent = make_intent(stack, "intent:revoke-crash")
+    view = comparison_view(
+        stack,
+        "view:crash",
+        call_id="call:revoke-crash",
+        fragment_ref=RecordRef(id="fragment:evt:1", revision=1),
+        authorization_id="use:finance-fields",
+    )
+    snapshot = review_snapshot(stack, "call:revoke-crash", intent, views=(view,))
+    stack.core.add_dependency(
+        RecordRef(id=snapshot.id, revision=snapshot.revision),
+        RecordRef(id=view.id, revision=view.revision),
+        DependencyKind.PRODUCER_INPUT,
+    )
+
+    stack.injector.arm(CrashCheckpoint.DURING_CORRECTION_JOB)
+    with pytest.raises(InjectedCrash):
+        stack.context_memory.revoke_view(RecordRef(id=view.id, revision=1))
+    stack.injector.disarm(CrashCheckpoint.DURING_CORRECTION_JOB)
+    untouched_view = stack.core.get_record(view.id)
+    assert isinstance(untouched_view, MemoryView) and untouched_view.status == RecordStatus.ACTIVE
+    untouched_snapshot = stack.core.get_record(snapshot.id)
+    assert (
+        isinstance(untouched_snapshot, ContextSnapshot)
+        and untouched_snapshot.status.value == "ACTIVE"
+    )
+
+    revoked = stack.context_memory.revoke_view(RecordRef(id=view.id, revision=1))
+    assert revoked.revision == 2
+    invalidated = stack.core.get_record(snapshot.id)
+    assert isinstance(invalidated, ContextSnapshot)
+    assert invalidated.status.value == "INVALID"

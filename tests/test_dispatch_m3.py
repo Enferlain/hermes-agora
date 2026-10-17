@@ -289,6 +289,42 @@ def test_capability_revocation_holds_before_dispatch(tmp_path: Path) -> None:
     assert _world_rows(stack) == []
 
 
+def test_view_revocation_after_authorize_holds_before_dispatch(tmp_path: Path) -> None:
+    """Bead l34 / I14: revoking a view the snapshot admitted invalidates
+    that snapshot, so a queued effect derived through it holds with
+    STALE_CONTEXT and nothing dispatches."""
+    from agora.contracts import DependencyKind
+    from tests.fixtures_review import comparison_view, feed_event, seed_five_classes
+
+    stack = ReviewStack(tmp_path)
+    seed_five_classes(stack)
+    feed_event(stack)
+    intent = make_intent(stack, "intent:view-hold")
+    view = comparison_view(
+        stack,
+        "view:held",
+        call_id="call:view-hold",
+        fragment_ref=RecordRef(id="fragment:evt:1", revision=1),
+        authorization_id="use:finance-fields",
+    )
+    snapshot = review_snapshot(stack, "call:view-hold", intent, views=(view,))
+    stack.core.add_dependency(  # the edge production build_snapshot writes
+        RecordRef(id=snapshot.id, revision=snapshot.revision),
+        RecordRef(id=view.id, revision=view.revision),
+        DependencyKind.PRODUCER_INPUT,
+    )
+    plan, rendered = _act_plan(stack, "view-hold", snapshot=snapshot, intent_ref=intent)
+    authorization = _authorize(stack, plan)
+
+    stack.context_memory.revoke_view(RecordRef(id=view.id, revision=1))
+
+    with pytest.raises(SidecarError) as excinfo:
+        _submit(stack, authorization, plan, rendered)
+    assert excinfo.value.code == ReasonCode.STALE_CONTEXT
+    assert stack.transport.outbox_state(plan.effects[0].logical_effect_id) == "HELD"
+    assert _world_rows(stack) == []
+
+
 def test_snapshot_invalidation_holds_before_dispatch(tmp_path: Path) -> None:
     """I14: a correction invalidating the snapshot after authorization
     holds the queued effect — dispatch nothing derived from stale context."""
