@@ -17,9 +17,10 @@ How the `agora` package grows without dumping everything into the root or into s
 | Module | Lines (approx.) | Plan |
 |---|---|---|
 | `contracts.py` | 2,500 | First promotion, at M2 start: `contracts/` package — `enums.py`, `values.py`, `canonical.py`, `records.py` (§4 families), `codec.py`, `model_steps.py`, re-exporting `__init__.py`. |
-| `stores.py` | 1,100 | Promotes when M3 dispatch work lands: `core.py`, `transport.py`, `ingestion.py`. |
+| `stores.py` | 1,590 | Promoted 2026-10-16 (`stores/`: `_base`, `core`, `transport`, `ingestion`). |
 | `coordinator.py` | 700 | Stays a module through M2; revisit at M3 if scheduling grows. |
-| `context_memory.py`, `commit_gate.py` | < 350 each | Grow in place during M2; promote only on the trigger. |
+| `context_memory.py` | 1,541 | Promoted 2026-10-17 (`context_memory/`: `evaluation`, `memory` — the trigger hit; the ContextMemory class itself stays whole until a second trigger). |
+| `commit_gate.py` | 672 | Grows in place; promote only on the trigger. |
 | `ports.py`, `fake_sidecar.py`, `runner.py`, `cli.py` | < 300 each | Stay modules. |
 
 ## Why packages-with-re-export over more flat modules

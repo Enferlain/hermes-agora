@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), with the change of using daily dated entries instead of releases.
 
+## 2026-10-17
+
+### Added
+
+- `agora/context_memory.py` (1,541 lines) promoted to the `agora/context_memory/` package per the structure convention's trigger: `evaluation.py` (the `AuthorityEvaluator` access engine with its input/verdict types) and `memory.py` (the `ContextMemory` class, its exceptions, selection constants and lineage helpers), with a re-exporting `__init__.py` so every `from agora.context_memory import X` keeps working. The class itself stays whole — a mixin split waits for a second trigger. Mechanical move; 315 tests green.
+
 ## 2026-10-16
 
 ### Added
