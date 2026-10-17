@@ -232,25 +232,33 @@ class CoreStore(_Domain):
         virtual milliseconds; the caller (who owns the clock) converts the
         record's ``valid_until``."""
         with _tx(self._conn) as connection:
-            self._put_record_tx(connection, memory)
+            self._promote_memory_tx(connection, memory, expiry_ms=expiry_ms)
             self._verify_ref_targets_tx(connection, (memory,))
-            connection.execute(
-                "INSERT INTO core_memory_scope (memory_id, revision, stage, scope_kind,"
-                " scope_ref, status, expiry_ms, assertion_ref, commitment_refs)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-                " ON CONFLICT (memory_id, revision) DO NOTHING",
-                (
-                    memory.id,
-                    memory.revision,
-                    memory.stage.value,
-                    memory.scope_kind.value,
-                    memory.scope_ref,
-                    memory.status.value,
-                    expiry_ms,
-                    memory.assertion_fragment_ref.id,
-                    json.dumps([f"{ref.id}:{ref.revision}" for ref in memory.commitment_refs]),
-                ),
-            )
+
+    def _promote_memory_tx(
+        self, connection: sqlite3.Connection, memory: MemoryRecord, *, expiry_ms: int | None
+    ) -> None:
+        """The promote writes inside a caller-open transaction, with
+        reference verification left to the caller's batch check (a
+        correction's whole invalidation walk is one atomic unit)."""
+        self._put_record_tx(connection, memory)
+        connection.execute(
+            "INSERT INTO core_memory_scope (memory_id, revision, stage, scope_kind,"
+            " scope_ref, status, expiry_ms, assertion_ref, commitment_refs)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT (memory_id, revision) DO NOTHING",
+            (
+                memory.id,
+                memory.revision,
+                memory.stage.value,
+                memory.scope_kind.value,
+                memory.scope_ref,
+                memory.status.value,
+                expiry_ms,
+                memory.assertion_fragment_ref.id,
+                json.dumps([f"{ref.id}:{ref.revision}" for ref in memory.commitment_refs]),
+            ),
+        )
 
     def memory_scope_rows(self, memory_id: str) -> list[dict[str, Any]]:
         rows = self._conn.execute(
@@ -450,21 +458,42 @@ class CoreStore(_Domain):
         commitment_refs: tuple[str, ...] = (),
         expires_at_ms: int | None = None,
     ) -> None:
-        with _tx(self._conn):
-            self._conn.execute(
-                "INSERT INTO core_payloads (payload_id, owner_ref, data, sensitivity_refs,"
-                " commitment_refs, expires_at_ms, status) VALUES (?, ?, ?, ?, ?, ?, ?)"
-                " ON CONFLICT(payload_id) DO NOTHING",
-                (
-                    payload_id,
-                    owner_ref,
-                    data,
-                    json.dumps(list(sensitivity_refs)),
-                    json.dumps(list(commitment_refs)),
-                    expires_at_ms,
-                    PayloadStatus.ACTIVE.value,
-                ),
+        with _tx(self._conn) as connection:
+            self._put_payload_tx(
+                connection,
+                payload_id,
+                data,
+                owner_ref=owner_ref,
+                sensitivity_refs=sensitivity_refs,
+                commitment_refs=commitment_refs,
+                expires_at_ms=expires_at_ms,
             )
+
+    def _put_payload_tx(
+        self,
+        connection: sqlite3.Connection,
+        payload_id: str,
+        data: str,
+        *,
+        owner_ref: str,
+        sensitivity_refs: tuple[str, ...] = (),
+        commitment_refs: tuple[str, ...] = (),
+        expires_at_ms: int | None = None,
+    ) -> None:
+        connection.execute(
+            "INSERT INTO core_payloads (payload_id, owner_ref, data, sensitivity_refs,"
+            " commitment_refs, expires_at_ms, status) VALUES (?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(payload_id) DO NOTHING",
+            (
+                payload_id,
+                owner_ref,
+                data,
+                json.dumps(list(sensitivity_refs)),
+                json.dumps(list(commitment_refs)),
+                expires_at_ms,
+                PayloadStatus.ACTIVE.value,
+            ),
+        )
 
     def get_payload(self, payload_id: str) -> str | None:
         row = self._conn.execute(

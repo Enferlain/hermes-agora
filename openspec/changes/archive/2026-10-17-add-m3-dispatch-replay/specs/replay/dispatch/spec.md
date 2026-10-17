@@ -6,12 +6,17 @@ Dispatch-time safety for the synthetic replay slice: what an authorized effect m
 
 ### Requirement: Pre-dispatch revalidation
 
-Inside the serialized reserve/consume window, before the durable DISPATCH_STARTED, the dispatcher re-reads the versions the authorization was bound to: the authorization (current, ACTIVE), the snapshot (current, ACTIVE, not INVALID), a reaction's target (still the current revision), the audience (disclosure revision and visibility unchanged), and the capability (ACTIVE). A mismatch holds the outbox row with the matching typed code and nothing is dispatched; a change ordered after DISPATCH_STARTED is too late for prevention and is handled conservatively.
+Inside the serialized reserve/consume window, before the durable DISPATCH_STARTED, the dispatcher re-reads the versions the authorization was bound to: the authorization (current, ACTIVE), the policy/commitment revisions its policy_version_vector binds — everything routing consulted, regardless of route — the snapshot (current, ACTIVE, not INVALID), a reaction's target (still the current revision), the audience (disclosure revision and visibility unchanged), and the capability (ACTIVE). A mismatch holds the outbox row with the matching typed code and nothing is dispatched; a change ordered after DISPATCH_STARTED is too late for prevention and is handled conservatively.
 
 #### Scenario: Policy revision before dispatch
 
 - **WHEN** a relevant policy revision lands after authorization but before dispatch starts
 - **THEN** the queued effect holds with POLICY_CHANGED and the world receives nothing
+
+#### Scenario: NONE-route authorization meets a tightening commitment
+
+- **WHEN** a commitment consulted by routing was permissive at authorization (route NONE) and is revised to prohibit expression before dispatch starts
+- **THEN** the queued effect holds with POLICY_CHANGED — routing evidence is revalidated, not just the routing result — and the world receives nothing
 
 #### Scenario: Edited reaction target
 

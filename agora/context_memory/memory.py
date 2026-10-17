@@ -804,13 +804,21 @@ class ContextMemory:
         everything derived from the superseded assertion is invalidated via
         the dependency graph: derivations flip STALE, their retained output
         memories flip STALE (payload ineligible through the scope index),
-        and affected snapshots flip INVALID."""
+        and affected snapshots flip INVALID. The whole correction — new
+        assertion plus the invalidation walk — is ONE core transaction, so
+        a crash mid-job (DURING_CORRECTION_JOB) rolls back to the
+        pre-correction state and the correction simply re-runs: never a
+        half-invalidated world where a queued effect's snapshot escaped
+        invalidation."""
         memory = self._current_memory_or_error(memory_ref)
         now = self.clock.now_rfc3339()
         fragment_id = f"fragment:memory:{memory.id}:{memory.revision + 1}"
-        self.core.put_payload(f"payload:{fragment_id}", corrected_text, owner_ref=memory.id)
-        self.core.put_record(
-            ContentFragment(
+        written: list[Record] = []
+        with self.core.transaction() as connection:
+            self.core._put_payload_tx(
+                connection, f"payload:{fragment_id}", corrected_text, owner_ref=memory.id
+            )
+            corrected_fragment = ContentFragment(
                 id=fragment_id,
                 revision=1,
                 created_at=now,
@@ -835,29 +843,36 @@ class ContextMemory:
                 commitment_refs=memory.commitment_refs,
                 eligibility_status=EligibilityStatus.ACTIVE,
             )
-        )
-        corrected = MemoryRecord(
-            id=memory.id,
-            revision=memory.revision + 1,
-            created_at=now,
-            assertion_fragment_ref=RecordRef(id=fragment_id, revision=1),
-            stage=memory.stage,
-            scope_kind=memory.scope_kind,
-            scope_ref=memory.scope_ref,
-            custodian_refs=memory.custodian_refs,
-            subject_refs=memory.subject_refs,
-            commitment_refs=memory.commitment_refs,
-            assertion_status=memory.assertion_status,
-            supersedes_ref=RecordRef(id=memory.id, revision=memory.revision),
-            valid_until=memory.valid_until,
-            status=MemoryStatus.ACTIVE,
-        )
-        self.core.promote_memory(
-            corrected, expiry_ms=self._memory_expiry(memory.id, memory.revision)
-        )
-        self._invalidate_dependents(
-            memory.assertion_fragment_ref.id, memory.assertion_fragment_ref.revision, now
-        )
+            self.core._put_record_tx(connection, corrected_fragment)
+            written.append(corrected_fragment)
+            corrected = MemoryRecord(
+                id=memory.id,
+                revision=memory.revision + 1,
+                created_at=now,
+                assertion_fragment_ref=RecordRef(id=fragment_id, revision=1),
+                stage=memory.stage,
+                scope_kind=memory.scope_kind,
+                scope_ref=memory.scope_ref,
+                custodian_refs=memory.custodian_refs,
+                subject_refs=memory.subject_refs,
+                commitment_refs=memory.commitment_refs,
+                assertion_status=memory.assertion_status,
+                supersedes_ref=RecordRef(id=memory.id, revision=memory.revision),
+                valid_until=memory.valid_until,
+                status=MemoryStatus.ACTIVE,
+            )
+            self.core._promote_memory_tx(
+                connection, corrected, expiry_ms=self._memory_expiry(memory.id, memory.revision)
+            )
+            written.append(corrected)
+            self._invalidate_dependents(
+                connection,
+                memory.assertion_fragment_ref.id,
+                memory.assertion_fragment_ref.revision,
+                now,
+                written,
+            )
+            self.core._verify_ref_targets_tx(connection, tuple(written))
         return RecordRef(id=corrected.id, revision=corrected.revision)
 
     def _current_memory_or_error(self, memory_ref: RecordRef) -> MemoryRecord:
@@ -893,17 +908,33 @@ class ContextMemory:
                 return row["expiry_ms"]
         return None
 
-    def _invalidate_dependents(self, fragment_id: str, fragment_revision: int, now: str) -> None:
+    def _invalidate_dependents(
+        self,
+        connection: Any,
+        fragment_id: str,
+        fragment_revision: int,
+        now: str,
+        written: list[Record],
+    ) -> None:
         """Corrections invalidate what was derived from the superseded
         assertion, transitively: a summary-of-a-summary chain propagates
         all the way down (source → summary A → summary B → snapshot), not
         one level (imi feedback on task 3). Only dependents whose captured
         version actually matches are affected; flipped revisions carry the
-        correction time as their creation time."""
-        self._invalidate_from(fragment_id, fragment_revision, now, set())
+        correction time as their creation time. The walk runs inside the
+        correction's one transaction — DURING_CORRECTION_JOB is the named
+        crash boundary inside it."""
+        self._trip(CrashCheckpoint.DURING_CORRECTION_JOB)
+        self._invalidate_from(connection, fragment_id, fragment_revision, now, set(), written)
 
     def _invalidate_from(
-        self, fragment_id: str, fragment_revision: int, now: str, visited: set[str]
+        self,
+        connection: Any,
+        fragment_id: str,
+        fragment_revision: int,
+        now: str,
+        visited: set[str],
+        written: list[Record],
     ) -> None:
         if fragment_id in visited:
             return
@@ -913,36 +944,40 @@ class ContextMemory:
             if isinstance(record, Derivation):
                 if not _vector_cites(record.input_version_vector, fragment_id, fragment_revision):
                     continue
-                self.core.put_record(
-                    replace(
-                        record,
-                        revision=record.revision + 1,
-                        created_at=now,
-                        state=DerivationState.STALE,
-                    )
+                stale = replace(
+                    record,
+                    revision=record.revision + 1,
+                    created_at=now,
+                    state=DerivationState.STALE,
                 )
-                self._stale_output_memory(record.output_fragment_ref, now)
+                self.core._put_record_tx(connection, stale)
+                written.append(stale)
+                self._stale_output_memory(connection, record.output_fragment_ref, now, written)
                 # whatever was derived from THIS derivation's output is
                 # built on stale content too — keep walking the graph
                 self._invalidate_from(
+                    connection,
                     record.output_fragment_ref.id,
                     record.output_fragment_ref.revision,
                     now,
                     visited,
+                    written,
                 )
             elif isinstance(record, ContextSnapshot):
                 if not _vector_cites(record.version_vector, fragment_id, fragment_revision):
                     continue
-                self.core.put_record(
-                    replace(
-                        record,
-                        revision=record.revision + 1,
-                        created_at=now,
-                        status=SnapshotStatus.INVALID,
-                    )
+                invalid = replace(
+                    record,
+                    revision=record.revision + 1,
+                    created_at=now,
+                    status=SnapshotStatus.INVALID,
                 )
+                self.core._put_record_tx(connection, invalid)
+                written.append(invalid)
 
-    def _stale_output_memory(self, output_fragment_ref: RecordRef, now: str) -> None:
+    def _stale_output_memory(
+        self, connection: Any, output_fragment_ref: RecordRef, now: str, written: list[Record]
+    ) -> None:
         """A derivation's retained output memory becomes ineligible: the
         scope-index row flips STALE with a new memory revision."""
         rows = self.core._conn.execute(
@@ -954,15 +989,16 @@ class ContextMemory:
             record = self.core.get_record(row["memory_id"], current.revision) if current else None
             if not isinstance(record, MemoryRecord) or record.status == MemoryStatus.STALE:
                 continue
-            self.core.promote_memory(
-                replace(
-                    record,
-                    revision=record.revision + 1,
-                    created_at=now,
-                    status=MemoryStatus.STALE,
-                ),
-                expiry_ms=self._memory_expiry(record.id, record.revision),
+            stale = replace(
+                record,
+                revision=record.revision + 1,
+                created_at=now,
+                status=MemoryStatus.STALE,
             )
+            self.core._promote_memory_tx(
+                connection, stale, expiry_ms=self._memory_expiry(record.id, record.revision)
+            )
+            written.append(stale)
 
     def build_snapshot(
         self,

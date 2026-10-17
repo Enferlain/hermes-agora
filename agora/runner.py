@@ -56,7 +56,13 @@ from agora.contracts import (
 )
 from agora.coordinator import Coordinator
 from agora.fake_sidecar import FakeSidecar, FakeWorld
-from agora.ports import FaultInjector, ScriptedMainModel, VirtualClock
+from agora.ports import (
+    CrashCheckpoint,
+    FaultInjector,
+    InjectedCrash,
+    ScriptedMainModel,
+    VirtualClock,
+)
 from agora.stores import CoreStore, JournalEntry, TransportStore
 from agora.transforms import transform_spec, validate_transform_parameters
 
@@ -69,10 +75,85 @@ class ManifestError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class FixtureEvent:
+    """One scripted journal event. Reusing ``event_id`` with a higher
+    ``source_revision`` (kind MESSAGE_UPDATED) models an upstream edit of
+    the same message; MESSAGE_DELETED carries no fragments."""
+
     at_ms: int
     event_id: str
     kind: str
     text: str
+    source_revision: int = 1
+
+
+def _parse_event(data: object) -> FixtureEvent:
+    if not isinstance(data, dict) or not {"at_ms", "event_id", "kind", "text"} <= set(data) <= {
+        "at_ms",
+        "event_id",
+        "kind",
+        "text",
+        "source_revision",
+    }:
+        raise ManifestError(
+            "each event must be exactly {at_ms, event_id, kind, text[, source_revision]}"
+        )
+    try:
+        at_ms = int(data["at_ms"])
+        source_revision = int(data.get("source_revision", 1))
+    except (TypeError, ValueError) as error:
+        raise ManifestError(f"event numeric field invalid: {error}") from error
+    if source_revision < 1:
+        raise ManifestError(f"source_revision must be >= 1, got {source_revision}")
+    return FixtureEvent(
+        at_ms=at_ms,
+        event_id=str(data["event_id"]),
+        kind=str(data["kind"]),
+        text=str(data["text"]),
+        source_revision=source_revision,
+    )
+
+
+def _validate_event_sequence(events: tuple[FixtureEvent, ...]) -> None:
+    """Edit sequences must be coherent: an id's first journal entry is its
+    revision 1, later entries strictly increase, and no (id, revision)
+    pair repeats — malformed manifests fail at parse, never as raw store
+    errors mid-run."""
+    seen_revisions: dict[str, int] = {}
+    pairs: set[tuple[str, int]] = set()
+    for event in sorted(events, key=lambda e: e.at_ms):
+        if (event.event_id, event.source_revision) in pairs:
+            raise ManifestError(
+                f"event {event.event_id!r} repeats source_revision {event.source_revision}"
+            )
+        pairs.add((event.event_id, event.source_revision))
+        previous = seen_revisions.get(event.event_id)
+        if previous is None:
+            if event.source_revision != 1:
+                raise ManifestError(
+                    f"event {event.event_id!r} first appears at source_revision"
+                    f" {event.source_revision}; revision 1 must come first"
+                )
+        elif event.source_revision <= previous:
+            raise ManifestError(
+                f"event {event.event_id!r} revisions must strictly increase"
+                f" ({previous} then {event.source_revision})"
+            )
+        seen_revisions[event.event_id] = event.source_revision
+
+
+@dataclass(frozen=True, slots=True)
+class FaultPlanStep:
+    """One scripted fault in the manifest's plan (M3 D6): a named crash
+    checkpoint fired while processing ``after_event``, then a restart of
+    the named domain (``core`` reopens core.sqlite — the runtime epoch
+    advances and RUNNING work returns READY; ``transport`` reopens
+    transport.sqlite — the sidecar generation advances; ``none`` keeps
+    running). The fault plan is a first-class fixture input, so a
+    manifest with faults replays as deterministically as one without."""
+
+    after_event: str
+    checkpoint: str
+    restart: str = "core"
 
 
 # ---------------------------------------------------------------------------
@@ -392,6 +473,7 @@ class RunManifest:
     events: tuple[FixtureEvent, ...]
     steps: tuple[Any, ...]  # parsed MainStep objects, consumed in order
     registries: Registries = Registries()
+    faults: tuple[FaultPlanStep, ...] = ()
 
     @classmethod
     def from_payload(cls, data: object) -> RunManifest:
@@ -407,9 +489,9 @@ class RunManifest:
             "steps",
         }
         provided = set(data)
-        if not required <= provided or not provided <= required | {"registries"}:
+        if not required <= provided or not provided <= required | {"registries", "faults"}:
             raise ManifestError(
-                f"manifest fields must be within {sorted(required | {'registries'})}"
+                f"manifest fields must be within {sorted(required | {'registries', 'faults'})}"
                 f" including {sorted(required)}; got {sorted(provided)}"
             )
         version = data["manifest_version"]
@@ -417,17 +499,11 @@ class RunManifest:
             raise ManifestError(f"unsupported manifest version {version!r}")
         if version < MANIFEST_VERSION and "registries" in data:
             raise ManifestError("registries require manifest_version 2")
-        events = tuple(
-            FixtureEvent(
-                at_ms=int(event["at_ms"]),
-                event_id=str(event["event_id"]),
-                kind=str(event["kind"]),
-                text=str(event["text"]),
-            )
-            for event in data["events"]
-        )
+        events = tuple(_parse_event(event) for event in data["events"])
+        _validate_event_sequence(events)
         steps = tuple(parse_model_step(step) for step in data["steps"])
         registries = _parse_registries(data["registries"]) if "registries" in data else Registries()
+        faults = cls._parse_faults(data.get("faults"), events)
         return cls(
             fixture_id=str(data["fixture_id"]),
             clock_anchor=str(data["clock_anchor"]),
@@ -436,7 +512,48 @@ class RunManifest:
             events=events,
             steps=steps,
             registries=registries,
+            faults=faults,
         )
+
+    @staticmethod
+    def _parse_faults(data: object, events: tuple[FixtureEvent, ...]) -> tuple[FaultPlanStep, ...]:
+        if data is None:
+            return ()
+        if not isinstance(data, list):
+            raise ManifestError("faults must be a list")
+        known_events = {event.event_id for event in events}
+        steps: list[FaultPlanStep] = []
+        for item in data:
+            if not isinstance(item, dict) or not {"after_event", "checkpoint"} <= set(item) <= {
+                "after_event",
+                "checkpoint",
+                "restart",
+            }:
+                raise ManifestError(
+                    "each fault must be exactly {after_event, checkpoint[, restart]}"
+                )
+            checkpoint = str(item["checkpoint"])
+            if checkpoint not in {member.value for member in CrashCheckpoint}:
+                raise ManifestError(f"unknown crash checkpoint {checkpoint!r}")
+            restart = str(item.get("restart", "core"))
+            if restart not in ("core", "transport", "none"):
+                raise ManifestError(f"fault restart must be core/transport/none, got {restart!r}")
+            after_event = str(item["after_event"])
+            if after_event not in known_events:
+                raise ManifestError(f"fault cites unknown event id {after_event!r}")
+            if checkpoint != "AFTER_INGEST_BEFORE_ACK" and restart != "core":
+                # only a core reopen performs the RUNNING->READY recovery a
+                # mid-turn crash needs; any other restart strands the work
+                raise ManifestError(
+                    f"fault on {checkpoint!r} requires restart 'core' (got {restart!r})"
+                )
+            steps.append(
+                FaultPlanStep(after_event=after_event, checkpoint=checkpoint, restart=restart)
+            )
+        keys = [(step.after_event, step.checkpoint) for step in steps]
+        if len(keys) != len(set(keys)):
+            raise ManifestError("fault plan reuses the same (after_event, checkpoint)")
+        return tuple(steps)
 
 
 # ---------------------------------------------------------------------------
@@ -691,9 +808,40 @@ class ReplayRunner:
         self.injector = FaultInjector()
         self._wire()
 
-    def _wire(self, steps: tuple[Any, ...] | None = None) -> None:
-        if steps is None:
-            steps = self.manifest.steps
+    # -- lifecycle controls (M3 D6, task 2.1) -------------------------------
+
+    def restart_core(self) -> None:
+        """Simulated core process loss: core.sqlite reopens (the runtime
+        epoch advances durably and RUNNING work returns READY with budgets
+        and dedup keys retained) and every core-bound component rewires.
+        The fresh main port starts at the accepted-step count, so a
+        crashed, unaccepted step replays at the same index — identical
+        replay, never a skipped or doubled step."""
+        self.core.close()
+        self.core = CoreStore(self.run_dir / "core.sqlite")
+        self._wire(replay_script=True)
+
+    def restart_transport(self) -> None:
+        """Simulated sidecar process loss: transport.sqlite reopens (the
+        transport generation advances durably); outbox and attempts
+        survive, and the sidecar continues on the new generation."""
+        self.transport.close()
+        self.transport = TransportStore(self.run_dir / "transport.sqlite")
+        self.sidecar.transport = self.transport
+
+    def advance_clock(self, delta_ms: int) -> int:
+        return self.clock.advance_ms(delta_ms)
+
+    def fault_at(self, checkpoint: CrashCheckpoint, *, times: int = 1) -> None:
+        self.injector.arm(checkpoint, times=times)
+
+    def _accepted_step_count(self) -> int:
+        row = self.core._conn.execute(
+            "SELECT COALESCE(SUM(main_steps_used), 0) FROM core_work"
+        ).fetchone()
+        return int(row[0])
+
+    def _wire(self, *, replay_script: bool = False) -> None:
         known = self.core.get_record("identity:agent")
         if known is None:
             identity, audience, capability, sink_ref = Coordinator.bootstrap(
@@ -712,7 +860,10 @@ class ReplayRunner:
             identity, _, _ = known, audience, capability
         seed_registries(self.core, self.clock, self.manifest.registries)
         self.context_memory = ContextMemory(self.core, self.clock, self.injector)
-        self.main_port = ScriptedMainModel(steps)
+        if replay_script or not hasattr(self, "main_port"):
+            self.main_port = ScriptedMainModel(
+                self.manifest.steps, start_calls=self._accepted_step_count()
+            )
         self.gate = CommitGate(self.core, self.clock)
         self.sidecar = FakeSidecar(self.core, self.transport, self.world, self.clock, self.injector)
         self.coordinator = Coordinator(
@@ -735,61 +886,176 @@ class ReplayRunner:
             "ingested": [],
             "turns": [],
             "world": [],
+            "faults": [],
         }
+        ingest_faults = {
+            step.after_event: step
+            for step in self.manifest.faults
+            if step.checkpoint == "AFTER_INGEST_BEFORE_ACK"
+        }
+        fired_ingest: set[str] = set()
         for index, event in enumerate(sorted(self.manifest.events, key=lambda e: e.at_ms), start=1):
             self.clock.advance_to(event.at_ms)
+            # an ingest fault fires once per event id, at its first journal
+            # entry — an edit sequence sharing the id does not re-fire it
+            fault = ingest_faults.get(event.event_id)
+            if fault is not None and event.event_id in fired_ingest:
+                fault = None
+            if fault is not None:
+                fired_ingest.add(event.event_id)
+            if fault is not None and fault.checkpoint == "AFTER_INGEST_BEFORE_ACK":
+                checkpoint = CrashCheckpoint(fault.checkpoint)
+                self.injector.arm(checkpoint)
+                ingested = False
+                try:
+                    self._append_event(index, event)
+                    receipt = self.coordinator.ingest(self.transport, consumer_id="core-1")
+                    trace["ingested"].append(
+                        {"seq": index, "event": event.event_id, "applied": list(receipt.applied)}
+                    )
+                    ingested = True
+                except InjectedCrash:
+                    pass
+                self.injector.disarm(checkpoint)
+                self._apply_restart(fault.restart)
+                if not ingested:
+                    # the row and cursor committed before the crash, only
+                    # the acknowledgement was lost — re-ingest is idempotent
+                    receipt = self.coordinator.ingest(self.transport, consumer_id="core-1")
+                    trace["ingested"].append(
+                        {
+                            "seq": index,
+                            "event": event.event_id,
+                            "applied": list(receipt.applied),
+                            "recovered_ingest": True,
+                        }
+                    )
+                trace["faults"].append(self._fault_entry(fault, fired=True))
+                continue
             self._append_event(index, event)
             receipt = self.coordinator.ingest(self.transport, consumer_id="core-1")
             trace["ingested"].append(
                 {"seq": index, "event": event.event_id, "applied": list(receipt.applied)}
             )
-        self._drain(trace)
+        # Ordinary pending events coalesce per trigger key (one READY work
+        # item), so all events ingest before turns drain; the fault plan
+        # then fires its remaining checkpoints inside the drain phase.
+        self._drain_with_faults(trace)
         self._fire_due_timers(trace)
         self._drain(trace)
+        self._reconcile_inflight(trace)
         trace["world"] = self._world_rows()
         return trace
 
+    def _drain_with_faults(self, trace: dict[str, Any]) -> None:
+        """Run the drain phase with the manifest's faults applied
+        sequentially: each fault's checkpoint is armed for one drain
+        attempt, a crash restarts the named domain, and the next attempt
+        continues — accepted steps never replay, crashed unaccepted steps
+        replay at the same index."""
+        remaining = [
+            step for step in self.manifest.faults if step.checkpoint != "AFTER_INGEST_BEFORE_ACK"
+        ]
+        while True:
+            fault = remaining[0] if remaining else None
+            if fault is not None:
+                self.injector.arm(CrashCheckpoint(fault.checkpoint))
+            try:
+                self._drain(trace)
+                if fault is None:
+                    return
+                # the checkpoint never fired in this drain: record the
+                # divergence honestly and try the next fault in list order
+                self.injector.disarm(CrashCheckpoint(fault.checkpoint))
+                trace["faults"].append(self._fault_entry(fault, fired=False))
+                remaining.pop(0)
+                continue
+            except InjectedCrash:
+                assert fault is not None  # armed above; the crash consumed it
+                self.injector.disarm(CrashCheckpoint(fault.checkpoint))
+                self._apply_restart(fault.restart)
+                trace["faults"].append(self._fault_entry(fault, fired=True))
+                remaining.pop(0)
+
+    def _apply_restart(self, restart: str) -> None:
+        if restart == "core":
+            self.restart_core()
+        elif restart == "transport":
+            self.restart_transport()
+
+    @staticmethod
+    def _fault_entry(fault: FaultPlanStep, *, fired: bool) -> dict[str, object]:
+        return {
+            "after_event": fault.after_event,
+            "checkpoint": fault.checkpoint,
+            "restart": fault.restart,
+            "fired": fired,
+        }
+
+    def _reconcile_inflight(self, trace: dict[str, Any]) -> None:
+        """Query first, never guess (§6.2): after the run settles, every
+        outbox row still past the linearization point (DISPATCH_STARTED at
+        restart, or UNKNOWN) resolves only through positive world
+        evidence; INDETERMINATE rows settle conservatively as UNKNOWN."""
+        trace.setdefault("reconciled", [])
+        rows = self.transport._conn.execute(
+            "SELECT logical_effect_id, state FROM transport_outbox"
+            " WHERE state IN ('DISPATCH_STARTED', 'UNKNOWN')"
+        ).fetchall()
+        for row in rows:
+            verdict = self.sidecar.reconcile(row["logical_effect_id"])
+            trace["reconciled"].append(
+                {"effect": row["logical_effect_id"], "verdict": str(verdict)}
+            )
+
     def _append_event(self, seq: int, event: FixtureEvent) -> None:
+        fragment_id = f"fragment:{event.event_id}"
+        payload_id = f"payload:{event.event_id}:r{event.source_revision}"
+        if event.kind == "MESSAGE_DELETED":
+            fragment_refs: tuple[str, ...] = ()
+        else:
+            self.core.put_payload(payload_id, event.text, owner_ref=event.event_id)
+            self.core.put_record(
+                ContentFragment(
+                    id=fragment_id,
+                    revision=event.source_revision,
+                    created_at=self.clock.now_rfc3339(),
+                    kind=FragmentKind.TEXT,
+                    payload_ref=payload_id,
+                    provenance=Provenance(
+                        producer_ref=RecordRef(id="principal:agent", revision=1),
+                        source_kind=SourceKind.SOCIAL_MESSAGE,
+                        origin_event_ref=None,
+                        claimed_speaker_ref=None,
+                        instruction_authority=InstructionAuthority.NONE,
+                        integrity=Integrity.EXTERNAL_UNVERIFIED,
+                        custodian_refs=(),
+                        subject_refs=(),
+                        original_audience_ref=None,
+                        assertion_status=AssertionStatus.OBSERVED_STATEMENT,
+                        producer_coverage_ref=None,
+                        model_claimed_parent_refs=(),
+                        occurred_at=self.clock.now_rfc3339(),
+                        observed_at=self.clock.now_rfc3339(),
+                    ),
+                    commitment_refs=(),
+                    eligibility_status=EligibilityStatus.ACTIVE,
+                )
+            )
+            fragment_refs = (fragment_id,)
         self.transport.append_events(
             (
                 JournalEntry(
                     journal_seq=seq,
                     source_event_id=event.event_id,
-                    source_revision=1,
+                    source_revision=event.source_revision,
                     kind=event.kind,
-                    payload_ref=f"payload:{event.event_id}",
-                    fragment_refs=(f"fragment:{event.event_id}",),
+                    payload_ref=payload_id,
+                    fragment_refs=fragment_refs,
                     recovery="COMPLETE",
                 ),
             )
         )
-        self.core.put_payload(f"payload:{event.event_id}", event.text, owner_ref=event.event_id)
-        fragment = ContentFragment(
-            id=f"fragment:{event.event_id}",
-            revision=1,
-            created_at=self.clock.now_rfc3339(),
-            kind=FragmentKind.TEXT,
-            payload_ref=f"payload:{event.event_id}",
-            provenance=Provenance(
-                producer_ref=RecordRef(id="principal:agent", revision=1),
-                source_kind=SourceKind.SOCIAL_MESSAGE,
-                origin_event_ref=None,
-                claimed_speaker_ref=None,
-                instruction_authority=InstructionAuthority.NONE,
-                integrity=Integrity.EXTERNAL_UNVERIFIED,
-                custodian_refs=(),
-                subject_refs=(),
-                original_audience_ref=None,
-                assertion_status=AssertionStatus.OBSERVED_STATEMENT,
-                producer_coverage_ref=None,
-                model_claimed_parent_refs=(),
-                occurred_at=self.clock.now_rfc3339(),
-                observed_at=self.clock.now_rfc3339(),
-            ),
-            commitment_refs=(),
-            eligibility_status=EligibilityStatus.ACTIVE,
-        )
-        self.core.put_record(fragment)
 
     def _drain(self, trace: dict[str, Any]) -> None:
         for work_id in self.coordinator.ready_work_ids():

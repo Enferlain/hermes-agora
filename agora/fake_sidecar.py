@@ -323,19 +323,7 @@ class FakeSidecar:
         # never after the linearization point.
         hold_code: ReasonCode | None = None
         with self.core.transaction() as connection:
-            row = connection.execute(
-                "SELECT state, runtime_epoch, transport_generation, expires_at_ms"
-                " FROM core_dispatch_leases WHERE lease_id = ?",
-                (lease_id,),
-            ).fetchone()
-            if row is None or row["state"] != "ISSUED":
-                raise SidecarError("lease not issuable", ReasonCode.LEASE_CONSUMED)
-            if row["runtime_epoch"] != self.core.runtime_epoch:
-                raise SidecarError("stale core epoch", ReasonCode.STALE_EPOCH)
-            if row["transport_generation"] != generation:
-                raise SidecarError("stale transport generation", ReasonCode.STALE_GENERATION)
-            if row["expires_at_ms"] < self.clock.now_ms():
-                raise SidecarError("lease expired", ReasonCode.LEASE_EXPIRED)
+            self._fence_consume_lease_tx(connection, lease_id, generation)
             hold_code = self._revalidation_hold(
                 connection,
                 authorization=authorization,
@@ -403,6 +391,28 @@ class FakeSidecar:
         )
         self.core.put_record(receipt)
         return receipt
+
+    def _fence_consume_lease_tx(
+        self, connection: sqlite3.Connection, lease_id: str, generation: int
+    ) -> None:
+        """Single-use lease consumption with epoch/generation/expiry
+        fencing (I10): one sidecar generation executes, and a stale epoch,
+        a stale generation, an expired or an already-consumed lease can
+        never start dispatch. Raises the typed SidecarError inside the
+        caller's transaction, so nothing partial commits."""
+        row = connection.execute(
+            "SELECT state, runtime_epoch, transport_generation, expires_at_ms"
+            " FROM core_dispatch_leases WHERE lease_id = ?",
+            (lease_id,),
+        ).fetchone()
+        if row is None or row["state"] != "ISSUED":
+            raise SidecarError("lease not issuable", ReasonCode.LEASE_CONSUMED)
+        if row["runtime_epoch"] != self.core.runtime_epoch:
+            raise SidecarError("stale core epoch", ReasonCode.STALE_EPOCH)
+        if row["transport_generation"] != generation:
+            raise SidecarError("stale transport generation", ReasonCode.STALE_GENERATION)
+        if row["expires_at_ms"] < self.clock.now_ms():
+            raise SidecarError("lease expired", ReasonCode.LEASE_EXPIRED)
 
     def _revalidation_hold(
         self,

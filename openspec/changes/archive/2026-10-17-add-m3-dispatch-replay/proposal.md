@@ -27,6 +27,6 @@ M1 built the whole-turn path with a single-shot dispatch skeleton (leases, attem
 
 ## Impact
 
-- Grows `agora/fake_sidecar.py` (revalidation window, retry rules), `agora/coordinator.py` (supersession in the rewrite loop), `agora/stores.py` (release-limit reservation — a DDL addition with a schema-version consideration), `agora/runner.py` (lifecycle controls, acceptance harness), and the replay tests.
+- Grows `agora/fake_sidecar.py` (revalidation window, retry rules), `agora/coordinator.py` (supersession in the rewrite loop), `agora/stores.py` (release-limit reservation over the existing M1 `core_release_reservations` ledger — no DDL change), `agora/runner.py` (lifecycle controls, acceptance harness), and the replay tests.
 - The architecture contracts are owned by the v0.2 handoff §6.2, §7, §8 (dispatch invariants) and §10 items 6–7; this change implements them, it does not redesign them.
 - No new runtime dependencies; no real transport (Discord arrives at M5 — no Discord resources are needed for this change).

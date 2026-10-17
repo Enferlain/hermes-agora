@@ -2,7 +2,7 @@
 
 Proposed development sequence · 8 October 2026
 
-> **Status:** Active roadmap — M0, M1 and M2 complete (per Beads); M3 is the active milestone
+> **Status:** Active roadmap — M0 through M3 complete (per Beads); M4 is the active milestone
 >
 > Milestone completion is tracked in Beads. This file describes intended sequencing and exit criteria.
 
@@ -33,7 +33,7 @@ Dates and release numbers should follow demonstrated capability. Architecture re
 | M6 — Autonomous live participation | Agent speaks, reacts, initiates and stays quiet within standing capabilities | M4 + M5 | Bounded live operation preserves identity, discretion and delivery rules |
 | M7 — Measured improvements and broader environments | Better economics, memory and capabilities where justified | Relevant earlier milestone | Each addition has its own contract, usefulness evidence and regression coverage |
 
-M0–M3 together define the first implementation phase. The immediate deliverable is the M3 dispatch and recovery work that completes the slice. M4 tests whether the architecture remains useful with real inference. M5–M6 provide the actual social presence. M7 is an extension lane, not a requirement to postpone ordinary participation indefinitely.
+M0–M3 together define the first implementation phase, which is now complete. The immediate deliverable is M4: running the same slice on actual Hermes and a local model. M4 tests whether the architecture remains useful with real inference. M5–M6 provide the actual social presence. M7 is an extension lane, not a requirement to postpone ordinary participation indefinitely.
 
 ## M0 — Implementation foundation
 
@@ -152,4 +152,4 @@ The coding session must not guess real confidentiality norms, unknown joint-auth
 
 Acceptance reports should separate code invariants, model-backed observations and live platform limitations. Later scope changes require a current implementation note or architecture revision, with Beads dependencies and applicable OpenSpec requirements updated. Historical v0.1/v0.2 files remain reference evidence.
 
-M0, M1 and M2 are complete. The next concrete deliverable is M3 (dispatch and recovery: pre-dispatch revalidation, acknowledged supersession, release limits, restart-safe replay and the I01–I16 acceptance battery), which finishes the synthetic slice. The objective is unchanged: a continuous agent that can know things, exercise discretion and still choose to participate naturally.
+M0 through M3 are complete: the full synthetic vertical slice (I01–I16, the three handoff stories, the named fault checkpoints) passes deterministically. The next concrete deliverable is M4 (local Hermes deliberation: the same slice driven by actual Hermes and a local model, with captured requests matching admitted context). The objective is unchanged: a continuous agent that can know things, exercise discretion and still choose to participate naturally.

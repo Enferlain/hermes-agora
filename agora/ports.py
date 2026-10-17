@@ -173,11 +173,14 @@ class ScriptedMainModel:
 
     Determinism rule: the same call index always returns the same step, so
     a crash between model and acceptance replays identically. Running past
-    the script is an error, never invention."""
+    the script is an error, never invention. A restarted run constructs a
+    fresh port at ``start_calls`` = the work rows' accepted-step count: a
+    crashed, unaccepted step replays at the same index while accepted
+    steps never replay."""
 
-    def __init__(self, steps: Sequence[MainStep]) -> None:
+    def __init__(self, steps: Sequence[MainStep], *, start_calls: int = 0) -> None:
         self._steps = tuple(steps)
-        self._calls = 0
+        self._calls = start_calls
 
     def step(self, envelope: Any) -> MainStep:
         index = self._calls
