@@ -124,7 +124,7 @@ Prefer launching subagents for reviews after meaningful tasks are finished.
 
 Delegate subagents for tasks when deemed that they can speed up work.
 
-Reviewer model should always be GLM-5.3-Flash Max [1m] (Whatever the exact id is).
+Both reviewer and worker models should always be GLM-5.3-Flash Max [1m] (Whatever the exact id is).
 
 ## Editing Guidelines
 
