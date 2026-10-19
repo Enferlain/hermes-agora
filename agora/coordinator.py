@@ -28,6 +28,8 @@ from agora.contracts import (
     ContentFragment,
     ContextSnapshot,
     DecisionKind,
+    DeliveryReceipt,
+    DeliveryState,
     Disposition,
     Effect,
     EffectKind,
@@ -65,6 +67,7 @@ from agora.contracts import (
     SinkStatus,
     SourceKind,
     TurnOutcome,
+    ValidationError,
     Visibility,
     WorkItem,
     WorkState,
@@ -79,6 +82,7 @@ from agora.stores import (
     CoreStore,
     IngestReceipt,
     InvalidReferenceError,
+    RecordConflictError,
     TransportStore,
     ingest_batch,
 )
@@ -424,8 +428,20 @@ class Coordinator:
                     )
                     effect_refs.extend(refs)
                     if decision.kind == DecisionKind.AUTHORIZED and receipt_ref is not None:
-                        outcome_kind = OutcomeKind.COMMITTED
-                        reason_codes = []
+                        receipt_record = self.core.get_record(receipt_ref.id, receipt_ref.revision)
+                        if (
+                            isinstance(receipt_record, DeliveryReceipt)
+                            and receipt_record.state == DeliveryState.UNKNOWN
+                        ):
+                            # the dispatch is in flight with uncertain remote
+                            # visibility: never reported as committed, never
+                            # blindly re-attempted (§6.2) — reconciliation
+                            # owns the resolution
+                            outcome_kind = OutcomeKind.DELIVERY_UNKNOWN
+                            reason_codes = [ReasonCode.DELIVERY_UNKNOWN]
+                        else:
+                            outcome_kind = OutcomeKind.COMMITTED
+                            reason_codes = []
                     elif decision.kind in (DecisionKind.DENIED, DecisionKind.HOLD):
                         # The turn holds, but the model may still offer a
                         # replacement within the submissions budget (§6.1
@@ -441,7 +457,20 @@ class Coordinator:
                     elif decision.kind == DecisionKind.QUIET_COMPLETED:
                         outcome_kind = OutcomeKind.NO_ACTION
                         reason_codes = []
-                    if outcome_kind in (OutcomeKind.COMMITTED, OutcomeKind.NO_ACTION):
+                    elif decision.kind == DecisionKind.DEFERRED:
+                        # a SUBMIT_PLAN(DEFER) resolution defers exactly like
+                        # the FINISH(DEFER) path: the intent gets its due
+                        # time and the turn ends DEFERRED (review finding:
+                        # this branch was silently swallowed before)
+                        self._defer_intent(work_id, chosen_intent)
+                        outcome_kind = OutcomeKind.DEFERRED
+                        reason_codes = []
+                    if outcome_kind in (
+                        OutcomeKind.COMMITTED,
+                        OutcomeKind.NO_ACTION,
+                        OutcomeKind.DEFERRED,
+                        OutcomeKind.DELIVERY_UNKNOWN,
+                    ):
                         break
                 elif isinstance(step, ModelRequestAccessStep):
                     result = self._request_access(step, chosen_intent, snapshot, work_id, call_id)
@@ -508,13 +537,14 @@ class Coordinator:
                 (outcome.id, WorkState.COMPLETED.value, work_id),
             )
         audit_code = _audit_code(outcome)
-        self.core.audit(
-            operation="turn",
-            entity_ref=work_id,
-            reason_code=audit_code,
-            version_refs=(outcome.id,),
-            at_ms=self.clock.now_ms(),
-        )
+        if audit_code is not None:
+            self.core.audit(
+                operation="turn",
+                entity_ref=work_id,
+                reason_code=audit_code,
+                version_refs=(outcome.id,),
+                at_ms=self.clock.now_ms(),
+            )
         return TurnResult(outcome=outcome, decision=decision, receipt_ref=receipt_ref)
 
     # -- plan handling --------------------------------------------------------
@@ -708,6 +738,8 @@ class Coordinator:
         if not isinstance(model_id, str) or not model_id:
             model_id = "access"
         resource_id = request.get("resource_id")
+        if not isinstance(resource_id, str | None):
+            raise PlanRejected(ReasonCode.INVALID_SCHEMA, "resource_id must be a string")
         if resource_id is not None and not isinstance(
             self.core.get_record(resource_id), ContentFragment
         ):
@@ -758,24 +790,30 @@ class Coordinator:
         necessity_text = request.get("necessity_text")
         if necessity_text is not None and not isinstance(necessity_text, str):
             raise PlanRejected(ReasonCode.INVALID_SCHEMA, "necessity_text must be a string")
-        bound = MemoryAccessRequest(
-            id=f"access:{call_id}:{model_id}",
-            revision=1,
-            created_at=self.clock.now_rfc3339(),
-            request_id=f"{call_id}:{model_id}",
-            intent_ref=intent_ref,
-            resource_id=resource_id,
-            data_class=data_class,
-            requested_precision=precision,
-            requested_fields=tuple(requested_fields),
-            transform_id=transform_id,
-            audience_ref=RecordRef(id=self.audience.id, revision=self.audience.revision),
-            intended_use=intended_use,
-            necessity_text=necessity_text,
-            necessity_payload_ref=None,
-            trigger_refs=tuple(trigger_refs),
-            runtime_origin=self._runtime_origin(snapshot, work_id),
-        )
+        try:
+            bound = MemoryAccessRequest(
+                id=f"access:{call_id}:{model_id}",
+                revision=1,
+                created_at=self.clock.now_rfc3339(),
+                request_id=f"{call_id}:{model_id}",
+                intent_ref=intent_ref,
+                resource_id=resource_id,
+                data_class=data_class,
+                requested_precision=precision,
+                requested_fields=tuple(requested_fields),
+                transform_id=transform_id,
+                audience_ref=RecordRef(id=self.audience.id, revision=self.audience.revision),
+                intended_use=intended_use,
+                necessity_text=necessity_text,
+                necessity_payload_ref=None,
+                trigger_refs=tuple(trigger_refs),
+                runtime_origin=self._runtime_origin(snapshot, work_id),
+            )
+        except ValidationError as error:
+            # model-supplied field values that pass the shape checks above
+            # can still fail the record contract's own rules — a typed
+            # rejection, never a crash out of the turn (review finding)
+            raise PlanRejected(ReasonCode.INVALID_SCHEMA, str(error)) from error
         return self.context_memory.request_access(bound)
 
     def _propose_memory(
@@ -877,11 +915,20 @@ class Coordinator:
 
     def _create_intent(self, goal_text: str, purpose_class: str) -> RecordRef:
         """Grantless autonomous intent creation (I01/D02): a valid goal from
-        the authenticated agent creates an intent; no grant prerequisite."""
-        payload_id = f"payload:goal:{canonical_digest(goal_text)[:20]}"
+        the authenticated agent creates an intent; no grant prerequisite.
+        The stem is the goal digest, uniquified per creation — the same
+        goal text may ground more than one intent over time (review
+        finding: the shared stem crashed record inserts on reuse) — and a
+        pathological id collision is a typed CONFLICT, never a crash."""
+        stem = canonical_digest(goal_text)[:20]
+        suffix = 2
+        while self.core.get_record(f"intent:agent:{stem}") is not None:
+            stem = f"{canonical_digest(goal_text)[:20]}:{suffix}"
+            suffix += 1
+        payload_id = f"payload:goal:{stem}"
         self.core.put_payload(payload_id, goal_text, owner_ref="identity:agent")
         fragment = ContentFragment(
-            id=f"fragment:goal:{canonical_digest(goal_text)[:20]}",
+            id=f"fragment:goal:{stem}",
             revision=1,
             created_at=self.clock.now_rfc3339(),
             kind=FragmentKind.TEXT,
@@ -905,9 +952,12 @@ class Coordinator:
             commitment_refs=(),
             eligibility_status=EligibilityStatus.ACTIVE,
         )
-        self.core.put_record(fragment)
+        try:
+            self.core.put_record(fragment)
+        except RecordConflictError as error:
+            raise PlanRejected(ReasonCode.CONFLICT, str(error)) from error
         intent = Intent(
-            id=f"intent:agent:{canonical_digest(goal_text)[:20]}",
+            id=f"intent:agent:{stem}",
             revision=1,
             created_at=self.clock.now_rfc3339(),
             creator_ref=RecordRef(id=self.identity.principal_ref.id, revision=1),
@@ -923,7 +973,10 @@ class Coordinator:
             expires_at=None,
             state=IntentState.OPEN,
         )
-        self.core.put_record(intent)
+        try:
+            self.core.put_record(intent)
+        except RecordConflictError as error:
+            raise PlanRejected(ReasonCode.CONFLICT, str(error)) from error
         return RecordRef(id=intent.id, revision=intent.revision)
 
     def _work_intent(self, work_id: str, work: dict[str, Any]) -> RecordRef:
@@ -962,7 +1015,10 @@ class Coordinator:
             commitment_refs=(),
             eligibility_status=EligibilityStatus.ACTIVE,
         )
-        self.core.put_record(fragment)
+        try:
+            self.core.put_record(fragment)
+        except RecordConflictError as error:
+            raise PlanRejected(ReasonCode.CONFLICT, str(error)) from error
         intent = Intent(
             id=intent_id,
             revision=1,
@@ -980,7 +1036,10 @@ class Coordinator:
             expires_at=None,
             state=IntentState.OPEN,
         )
-        self.core.put_record(intent)
+        try:
+            self.core.put_record(intent)
+        except RecordConflictError as error:
+            raise PlanRejected(ReasonCode.CONFLICT, str(error)) from error
         return RecordRef(id=intent.id, revision=intent.revision)
 
 
@@ -989,15 +1048,19 @@ _OUTCOME_AUDIT_CODES: dict[OutcomeKind, ReasonCode] = {
     OutcomeKind.NO_ACTION: ReasonCode.NO_ACTION,
     OutcomeKind.DEFERRED: ReasonCode.DEFERRED,
     OutcomeKind.DELIVERY_UNKNOWN: ReasonCode.DELIVERY_UNKNOWN,
-    OutcomeKind.FAILED_INTERNAL: ReasonCode.BUDGET_EXHAUSTED,
     OutcomeKind.HELD: ReasonCode.REVIEW_CONCERN,
 }
 
 
-def _audit_code(outcome: TurnOutcome) -> str:
+def _audit_code(outcome: TurnOutcome) -> str | None:
+    """The outcome's own reason code when it has one, else the kind's
+    standing code. FAILED_INTERNAL intentionally has no standing code: a
+    reasonless internal failure is not budget exhaustion, and an audit row
+    without an honest code is worse than no row."""
     if outcome.reason_codes:
         return outcome.reason_codes[0].value
-    return _OUTCOME_AUDIT_CODES[outcome.kind].value
+    mapped = _OUTCOME_AUDIT_CODES.get(outcome.kind)
+    return None if mapped is None else mapped.value
 
 
 def _json_dumps(value: Any) -> str:

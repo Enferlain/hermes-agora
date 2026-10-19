@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), with the change of using daily dated entries instead of releases.
 
+## 2026-10-19
+
+### Fixed
+
+- Coordinator hardening from the first whole-file adversarial review of the turn engine (0 critical, 2 high, 4 medium, 6 low, 2 nit — all four fixable-now findings fixed with regressions, the contract-level deviations filed as beads): a direct SUBMIT_PLAN(DEFER) resolution is now honored like FINISH(DEFER) — the intent gets its due time and the turn ends DEFERRED instead of silently swallowing the gate's DEFERRED decision; model-reachable access-request fields that fail the record contract (a list resource_id, id-hostile request ids) and CREATE_INTENT id collisions are typed INVALID_SCHEMA/CONFLICT holds that complete the work — never an uncaught exception stranding it RUNNING with a live lease — and intent stems are uniquified per creation so the same goal text can ground a second intent; a dispatch ending UNKNOWN reports the turn as DELIVERY_UNKNOWN (previously dead vocabulary misreporting a possibly-delivered effect as COMMITTED), and a reasonless FAILED_INTERNAL no longer audits as budget exhaustion (no audit row rather than a dishonest one). Also parenthesized a PEP 758 two-name except clause whose unparenthesized form masked a latent NameError-on-rename hazard. The defer/wake resume semantics, submit-path crash atomicity, dead HOLD work state, and the model-supplied purpose_class authority leak are filed as designed follow-ups (hermes-agora-9xk, yps, lcc, njy, xek). 339 passed / 0 skipped via 'uv run pytest'; ruff/format/ty clean.
+
 ## 2026-10-18
 
 ### Added

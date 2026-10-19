@@ -360,3 +360,112 @@ def test_reaction_to_purged_target_payload_is_a_typed_hold(tmp_path: Path) -> No
     assert stack.core.get_record(f"plan:{work_id}:1") is None
     assert stack.transport._conn.execute("SELECT count(*) FROM transport_outbox").fetchone()[0] == 0
     assert stack.world._conn.execute("SELECT count(*) FROM world_effects").fetchone()[0] == 0
+
+
+def test_defer_via_submit_plan_defers_the_intent(tmp_path: Path) -> None:
+    """Review finding: a direct SUBMIT_PLAN(DEFER) resolution is honored
+    like the FINISH(DEFER) path — the intent gets its due time and the
+    turn ends DEFERRED, never silently swallowed."""
+    from agora.contracts import Disposition, ModelSubmitPlanStep
+
+    defer_step = ModelSubmitPlanStep(
+        kind=MainStepKind.SUBMIT_PLAN,
+        intent_ref=RecordRef(id="intent:turn:work:turn:evt:1", revision=1),
+        disposition=Disposition.DEFER,
+        effects=(),
+        declared_fact_refs=(),
+    )
+    stack = Stack(tmp_path, [defer_step])
+    feed_event(stack)
+    work_id = stack.coordinator.ready_work_ids()[0]
+    result = stack.coordinator.run_turn(work_id)
+    assert result.outcome.kind == OutcomeKind.DEFERRED
+    intent = stack.core.get_record(f"intent:turn:{work_id}")
+    from agora.contracts import Intent
+
+    assert isinstance(intent, Intent) and intent.due_at is not None
+
+
+def test_malformed_access_request_is_a_typed_hold_not_a_crash(tmp_path: Path) -> None:
+    """Review finding: model-reachable request fields that fail the record
+    contract (a list resource_id, an id-hostile request_id) are typed
+    INVALID_SCHEMA holds that complete the work — never an exception out
+    of the turn stranding it RUNNING with a live lease."""
+    from agora.contracts import MainStepKind as MSK
+    from agora.contracts import ModelRequestAccessStep
+
+    stack = Stack(
+        tmp_path,
+        [
+            ModelRequestAccessStep(
+                kind=MSK.REQUEST_ACCESS,
+                request={
+                    "resource_id": ["not-a-string"],
+                    "intended_use": "INTERNAL_ONLY",
+                    "requested_precision": "FIELDS",
+                },
+            ),
+            ModelRequestAccessStep(
+                kind=MSK.REQUEST_ACCESS,
+                request={
+                    "request_id": "bad id!",
+                    "resource_id": None,
+                    "data_class": "x",
+                    "intended_use": "INTERNAL_ONLY",
+                    "requested_precision": "FIELDS",
+                },
+            ),
+        ],
+    )
+    feed_event(stack)
+    work_id = stack.coordinator.ready_work_ids()[0]
+    result = stack.coordinator.run_turn(work_id)
+    assert result.outcome.kind == OutcomeKind.HELD
+    assert "INVALID_SCHEMA" in [code.value for code in result.outcome.reason_codes]
+    work = stack.core.get_work(work_id)
+    assert work is not None and work["state"] == "COMPLETED"  # not stranded RUNNING
+
+
+def test_repeated_create_intent_with_the_same_goal_never_crashes(tmp_path: Path) -> None:
+    """Review finding: the goal stem is uniquified per creation, so the
+    same goal text can ground a second intent instead of colliding on the
+    shared fragment/intent ids."""
+    from agora.contracts import ModelCreateIntentStep
+
+    step = ModelCreateIntentStep(
+        kind=MainStepKind.CREATE_INTENT,
+        goal_text="track the project thread",
+        purpose_class="social-participation",
+        allowed_destination_ids=("room:public",),
+        due_at=None,
+        expires_at=None,
+    )
+    stack = Stack(tmp_path, [step, step])
+    feed_event(stack)
+    work_id = stack.coordinator.ready_work_ids()[0]
+    stack.coordinator.run_turn(work_id)  # the turn must not crash
+    # the exhausted-script outcome shape is the M1 convention
+    # (FAILED_INTERNAL, and with the audit fix no longer mislabeled budget
+    # exhaustion); the point is both intents grounded
+    stems = stack.core._conn.execute(
+        "SELECT record_id FROM core_records WHERE record_id LIKE 'intent:agent:%'"
+    ).fetchall()
+    assert len(stems) == 2  # both creations grounded distinct intents
+
+
+def test_timeout_delivery_reports_unknown_not_committed(tmp_path: Path) -> None:
+    """Review finding: a dispatch that ends UNKNOWN is reported as
+    DELIVERY_UNKNOWN — reconciliation owns the resolution; the turn never
+    claims a possibly-delivered effect as committed."""
+    from tests.fixtures_review import speak_step
+
+    stack = Stack(tmp_path, [speak_step("into the void")])
+    feed_event(stack)
+    work_id = stack.coordinator.ready_work_ids()[0]
+    stack.world.script(
+        f"attempt:{work_id}:effect:0:1",
+        __import__("agora.fake_sidecar", fromlist=["WorldOutcome"]).WorldOutcome("timeout"),
+    )
+    result = stack.coordinator.run_turn(work_id)
+    assert result.outcome.kind == OutcomeKind.DELIVERY_UNKNOWN
+    assert "DELIVERY_UNKNOWN" in [code.value for code in result.outcome.reason_codes]
