@@ -303,6 +303,15 @@ class Coordinator:
     def ready_work_ids(self) -> tuple[str, ...]:
         return self.core.ready_work_ids()
 
+    def resume_work(self, work_id: str) -> None:
+        """Resume a HELD work item on a named external change (§6.1:
+        policy/resource/target/audience/review-service recovery, or an
+        agent-chosen replacement plan within budgets): HOLD → READY with
+        every counter and the dedup trigger key retained (§8:
+        resumptions retain counters — never an automatic spin; the caller
+        names the change)."""
+        self.core.transition_work(work_id, WorkState.READY, expected_state=WorkState.HOLD)
+
     def run_turn(self, work_id: str, *, intent_ref: RecordRef | None = None) -> TurnResult:
         """Run one work item to a typed outcome. Steps are accepted with
         compare-and-set on the work counter, so a crash between model and
@@ -596,9 +605,21 @@ class Coordinator:
             outcome_kind = OutcomeKind.HELD
             reason_codes.append(rejected.code)
 
+        # A HELD turn parks the work in HOLD (§6.1: READY → RUNNING →
+        # COMPLETED or HOLD — bead lcc): the hold stays resumable on a
+        # named external change with counters retained, never
+        # force-completed into an unresumable state. Every other outcome
+        # completes. A resumed turn appends the next outcome revision —
+        # the held turn's outcome stays as history.
+        final_state = (
+            WorkState.HOLD
+            if (outcome_kind or OutcomeKind.FAILED_INTERNAL) == OutcomeKind.HELD
+            else WorkState.COMPLETED
+        )
+        prior_outcome = self.core.current_ref(f"outcome:{work_id}")
         outcome = TurnOutcome(
             id=f"outcome:{work_id}",
-            revision=1,
+            revision=(prior_outcome.revision + 1) if prior_outcome is not None else 1,
             created_at=self.clock.now_rfc3339(),
             kind=outcome_kind or OutcomeKind.FAILED_INTERNAL,
             intent_ref=chosen_intent,
@@ -620,7 +641,7 @@ class Coordinator:
             connection.execute(
                 "UPDATE core_work SET terminal_outcome_ref = ?, state = ?,"
                 " lease_owner = NULL, lease_until_ms = NULL WHERE work_id = ?",
-                (outcome.id, WorkState.COMPLETED.value, work_id),
+                (outcome.id, final_state.value, work_id),
             )
             self._trip(CrashCheckpoint.DURING_COMPLETION_TX)
         audit_code = _audit_code(outcome)

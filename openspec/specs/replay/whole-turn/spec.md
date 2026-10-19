@@ -47,12 +47,17 @@ A deterministic replay command demonstrates an ordinary message, a reaction, an 
 
 ### Requirement: Quiet outcomes stay typed and invisible
 
-Internal outcomes and errors never automatically convert into public acknowledgement; NO_ACTION creates no outbox row.
+Internal outcomes and errors never automatically convert into public acknowledgement; NO_ACTION creates no outbox row. A turn ending HELD parks its work in HOLD (READY → RUNNING → COMPLETED or HOLD) with the lease cleared; HOLD resumes only on a named external change (policy/resource/target/audience/review-service recovery, or an agent-chosen replacement plan within budgets) with every counter and the dedup trigger key retained — never an automatic spin.
 
 #### Scenario: Error during deliberation
 
 - **WHEN** a main-step error or budget exhaustion occurs
 - **THEN** the turn records its typed outcome (FAILED_INTERNAL or BUDGET_EXHAUSTED with quiet completion) and produces no visible fallback
+
+#### Scenario: Held turn parks resumably
+
+- **WHEN** a turn ends HELD (a typed denial the bounded rewrite loop did not resolve)
+- **THEN** the work row parks in HOLD with its outcome on record and its lease cleared, and a named external change resumes it to READY with counters retained; the resumed turn appends the next outcome revision
 
 ### Requirement: Unsupported operations stay inert
 

@@ -504,11 +504,105 @@ def test_defer_expiry_preceding_due_is_a_typed_hold(tmp_path: Path) -> None:
     assert isinstance(intent, Intent) and intent.state.value == "OPEN"  # never deferred
 
 
+def test_stand_down_after_a_held_submission_completes_the_turn(tmp_path: Path) -> None:
+    """The parking rule's other corner: an explicit FINISH(NO_ACTION)
+    after a held submission in the SAME turn is normal silence — the turn
+    ends NO_ACTION and COMPLETES (a held DECISION stays on record, but
+    the work does not park; only a turn ENDING HELD parks)."""
+    from agora.contracts import Disposition, FinishChoice, ModelEffectDraft, ModelFinishStep
+
+    held_reaction = ModelSubmitPlanStep(
+        kind=MainStepKind.SUBMIT_PLAN,
+        intent_ref=RecordRef(id="intent:turn:work:turn:evt:1", revision=1),
+        disposition=Disposition.ACT,
+        effects=(
+            ModelEffectDraft(
+                kind=EffectKind.ADD_REACTION,
+                destination_id="room:secret",
+                text=None,
+                target_ref=RecordRef(id="fragment:evt:1", revision=1),
+                emoji="👋",
+            ),
+        ),
+        declared_fact_refs=(),
+    )
+    stack = Stack(
+        tmp_path,
+        [held_reaction, ModelFinishStep(kind=MainStepKind.FINISH, outcome=FinishChoice.NO_ACTION)],
+    )
+    feed_event(stack)
+    work_id = stack.coordinator.ready_work_ids()[0]
+    result = stack.coordinator.run_turn(work_id)
+    assert result.outcome.kind == OutcomeKind.NO_ACTION
+    work = stack.core.get_work(work_id)
+    assert work is not None and work["state"] == "COMPLETED"
+
+
+def test_held_turn_parks_and_resumes_with_retained_counters(tmp_path: Path) -> None:
+    """Bead lcc: a turn ending HELD parks the work in HOLD (§6.1 READY →
+    RUNNING → COMPLETED or HOLD) with the lease cleared — never
+    force-completed into an unresumable state. resume_work (the named
+    external change) returns it to READY with every counter retained, and
+    the resumed turn appends outcome revision 2 instead of conflicting
+    with the held turn's fixed-id outcome record."""
+    from agora.contracts import Disposition, FinishChoice, ModelEffectDraft, ModelFinishStep
+
+    bad_reaction = ModelSubmitPlanStep(
+        kind=MainStepKind.SUBMIT_PLAN,
+        intent_ref=RecordRef(id="intent:turn:work:turn:evt:1", revision=1),
+        disposition=Disposition.ACT,
+        effects=(
+            ModelEffectDraft(
+                kind=EffectKind.ADD_REACTION,
+                destination_id="room:public",
+                text=None,
+                target_ref=RecordRef(id="fragment:evt:404", revision=1),
+                emoji="👋",
+            ),
+        ),
+        declared_fact_refs=(),
+    )
+    steps = [
+        bad_reaction,
+        ModelFinishStep(kind=MainStepKind.FINISH, outcome=FinishChoice.NO_ACTION),
+    ]
+    stack = Stack(tmp_path, steps)
+    feed_event(stack)
+    work_id = stack.coordinator.ready_work_ids()[0]
+    result = stack.coordinator.run_turn(work_id)
+    assert result.outcome.kind == OutcomeKind.HELD
+    work = stack.core.get_work(work_id)
+    assert work is not None and work["state"] == "HOLD"
+    assert work["lease_owner"] is None
+    held_steps = work["main_steps_used"]
+
+    # restart recovery touches RUNNING only: the parked hold survives
+    start_ms = stack.clock.now_ms()
+    stack.core.close()
+    stack.transport.close()
+    stack.world.close()
+    reopened = Stack(tmp_path, steps, start_calls=held_steps, start_ms=start_ms)
+    parked = reopened.core.get_work(work_id)
+    assert parked is not None and parked["state"] == "HOLD"
+
+    # the named external change resumes it; counters stay put
+    reopened.coordinator.resume_work(work_id)
+    resumed = reopened.core.get_work(work_id)
+    assert resumed is not None and resumed["state"] == "READY"
+    assert resumed["main_steps_used"] == held_steps
+    result2 = reopened.coordinator.run_turn(work_id)
+    assert result2.outcome.kind == OutcomeKind.NO_ACTION
+    final = reopened.core.get_work(work_id)
+    assert final is not None and final["state"] == "COMPLETED"
+    outcome_ref = reopened.core.current_ref(f"outcome:{work_id}")
+    assert outcome_ref is not None and outcome_ref.revision == 2
+
+
 def test_malformed_access_request_is_a_typed_hold_not_a_crash(tmp_path: Path) -> None:
     """Review finding: model-reachable request fields that fail the record
     contract (a list resource_id, an id-hostile request_id) are typed
-    INVALID_SCHEMA holds that complete the work — never an exception out
-    of the turn stranding it RUNNING with a live lease."""
+    INVALID_SCHEMA holds that park the work resumably (§6.1) — never an
+    exception out of the turn stranding it RUNNING with a live lease."""
     from agora.contracts import MainStepKind as MSK
     from agora.contracts import ModelRequestAccessStep
 
@@ -541,7 +635,8 @@ def test_malformed_access_request_is_a_typed_hold_not_a_crash(tmp_path: Path) ->
     assert result.outcome.kind == OutcomeKind.HELD
     assert "INVALID_SCHEMA" in [code.value for code in result.outcome.reason_codes]
     work = stack.core.get_work(work_id)
-    assert work is not None and work["state"] == "COMPLETED"  # not stranded RUNNING
+    # the hold parks the work resumably (§6.1), never strands it RUNNING
+    assert work is not None and work["state"] == "HOLD"
 
 
 def test_repeated_create_intent_with_the_same_goal_never_crashes(tmp_path: Path) -> None:
@@ -591,10 +686,11 @@ def test_timeout_delivery_reports_unknown_not_committed(tmp_path: Path) -> None:
 
 def test_create_intent_with_unregistered_purpose_class_is_a_typed_hold(tmp_path: Path) -> None:
     """Bead njy: the purpose-class vocabulary is runtime-registered fixture
-    policy (handoff §4.5 — bounded strings used to MATCH a permission,
+    policy (handoff §4.4 — bounded strings used to MATCH a permission,
     never evidence for issuing one). A model-invented class is a typed
-    POLICY_FORBIDDEN hold that completes the work; no intent record is
-    grounded, so no model-supplied string reaches authority evaluation."""
+    POLICY_FORBIDDEN hold that parks the work resumably (§6.1); no intent
+    record is grounded, so no model-supplied string reaches authority
+    evaluation."""
     from agora.contracts import ModelCreateIntentStep
 
     step = ModelCreateIntentStep(
@@ -616,7 +712,7 @@ def test_create_intent_with_unregistered_purpose_class_is_a_typed_hold(tmp_path:
     ).fetchone()[0]
     assert agent_intents == 0
     work = stack.core.get_work(work_id)
-    assert work is not None and work["state"] == "COMPLETED"
+    assert work is not None and work["state"] == "HOLD"
 
 
 def test_create_intent_with_registered_purpose_class_grounds(tmp_path: Path) -> None:
