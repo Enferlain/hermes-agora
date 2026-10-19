@@ -59,6 +59,7 @@ from agora.contracts import (
     PrincipalKind,
     Provenance,
     ReasonCode,
+    Record,
     RecordRef,
     RecordStatus,
     RequestedPrecision,
@@ -148,6 +149,10 @@ class Coordinator:
         self.config = config or TurnConfig()
         self.injector = injector
 
+    def _trip(self, checkpoint: CrashCheckpoint) -> None:
+        if self.injector is not None:
+            self.injector.trip(checkpoint)
+
     # -- identity bootstrap -------------------------------------------------
 
     @classmethod
@@ -161,7 +166,33 @@ class Coordinator:
     ) -> tuple[AgentIdentity, AudienceSnapshot, CapabilityEnvelope, RecordRef]:
         """Create the per-run fixture control records: exactly one agent
         identity, an audience snapshot for the destination, a standing
-        capability envelope, and the scripted compute sink."""
+        capability envelope, and the scripted compute sink. Idempotent on a
+        reopened store: an existing identity means the run's records are
+        already in place, and they are read back instead of rewritten (a
+        restart's advanced clock must not conflict with its own fixtures)."""
+        existing = core.get_record("identity:agent")
+        if isinstance(existing, AgentIdentity):
+            audience = core.get_record(f"audience:{destination_id}")
+            capability = core.get_record("capability:social")
+            sink = core.get_record("sink:scripted")
+            if audience is None or capability is None or sink is None:
+                # An identity without its fixtures means the store was
+                # bootstrapped for a different destination (or is torn):
+                # fail loudly rather than silently return a stale capability
+                # bound to another destination's envelope.
+                raise ValueError(
+                    f"identity:agent exists but the fixture records for"
+                    f" destination {destination_id!r} do not"
+                )
+            assert isinstance(audience, AudienceSnapshot)
+            assert isinstance(capability, CapabilityEnvelope)
+            assert isinstance(sink, ComputeSink)
+            return (
+                existing,
+                audience,
+                capability,
+                RecordRef(id=sink.id, revision=sink.revision),
+            )
         now = clock.now_rfc3339()
         principal = Principal(
             id="principal:agent",
@@ -285,6 +316,12 @@ class Coordinator:
         if work["episode_ref"] is not None:
             episode_ref = self.core.current_ref(work["episode_ref"])
         effect_refs: list[RecordRef] = []
+        # Coordinator-minted terminal decisions commit with the outcome in
+        # one transaction at turn end (yp): written mid-turn they would sit
+        # in an un-checkpointed window where a crash orphans their fixed
+        # ids, and the recovery turn's re-derivation conflicts against the
+        # orphan across restarts.
+        terminal_records: list[Record] = []
 
         try:
             for _ in range(self.config.max_main_steps):
@@ -325,7 +362,7 @@ class Coordinator:
                         authorization_ref=None,
                         assessment_ref=None,
                     )
-                    self.core.put_record(decision)
+                    terminal_records.append(decision)
                     outcome_kind = OutcomeKind.HELD
                     reason_codes = [error.code]
                     break
@@ -346,8 +383,7 @@ class Coordinator:
                     # so the standing outcome — a hold, if one stands — is
                     # the terminal state, not a fresh budget failure.
                     break
-                if self.injector is not None:
-                    self.injector.trip(CrashCheckpoint.AFTER_MODEL_BEFORE_ACCEPT)
+                self._trip(CrashCheckpoint.AFTER_MODEL_BEFORE_ACCEPT)
 
                 # CAS: accept at most one continuation per step version.
                 with self.core.transaction() as connection:
@@ -515,7 +551,7 @@ class Coordinator:
                 authorization_ref=None,
                 assessment_ref=None,
             )
-            self.core.put_record(decision)
+            terminal_records.append(decision)
             outcome_kind = OutcomeKind.HELD
             reason_codes.append(rejected.code)
 
@@ -529,13 +565,23 @@ class Coordinator:
             reason_codes=tuple(reason_codes),
             effect_refs=tuple(effect_refs),
         )
-        self.core.put_record(outcome)
+        # The terminal writes commit as one unit (yp): the coordinator's
+        # terminal decisions, the fixed-id outcome record, and the work
+        # completion UPDATE. A crash in the old two-transaction window
+        # orphaned outcome:{work} and the recovery turn's rewrite of the
+        # same id raised RecordConflictError on every restart — a crash
+        # loop. Atomic here, a crash leaves the work cleanly un-terminated.
         with self.core.transaction() as connection:
+            for record in terminal_records:
+                self.core._put_record_tx(connection, record)
+            self.core._put_record_tx(connection, outcome)
+            self.core._verify_ref_targets_tx(connection, (*terminal_records, outcome))
             connection.execute(
                 "UPDATE core_work SET terminal_outcome_ref = ?, state = ?,"
                 " lease_owner = NULL, lease_until_ms = NULL WHERE work_id = ?",
                 (outcome.id, WorkState.COMPLETED.value, work_id),
             )
+            self._trip(CrashCheckpoint.DURING_COMPLETION_TX)
         audit_code = _audit_code(outcome)
         if audit_code is not None:
             self.core.audit(
@@ -590,30 +636,35 @@ class Coordinator:
         work = self.core.get_work(work_id)
         assert work is not None
         self._validate_model_refs(step)
-        effects: list[Effect] = []
+        # Build phase (pure): rendering and validation raise PlanRejected
+        # before anything is written, so a bad effect can no longer strand
+        # the writes of its earlier siblings.
+        prepared: list[tuple[str, str, Effect]] = []
         for index, draft in enumerate(step.effects):
             rendered = self._render(draft)
             payload_id = f"payload:effect:{work_id}:{proposal_revision}:{index}"
-            self.core.put_payload(
-                payload_id,
-                _json_dumps(rendered),
-                owner_ref=f"work:{work_id}",
+            prepared.append(
+                (
+                    payload_id,
+                    _json_dumps(rendered),
+                    Effect(
+                        id=f"{work_id}:effect:{proposal_revision}:{index}",
+                        revision=1,
+                        created_at=self.clock.now_rfc3339(),
+                        logical_effect_id=f"{work_id}:effect:{index}",
+                        kind=draft.kind,
+                        account_id=self.capability.account_id,
+                        destination_id=draft.destination_id,
+                        target_ref=draft.target_ref,
+                        rendered_payload_ref=payload_id,
+                        payload_digest=canonical_digest(rendered),
+                        capability_ref=RecordRef(
+                            id=self.capability.id, revision=self.capability.revision
+                        ),
+                    ),
+                )
             )
-            effect = Effect(
-                id=f"{work_id}:effect:{proposal_revision}:{index}",
-                revision=1,
-                created_at=self.clock.now_rfc3339(),
-                logical_effect_id=f"{work_id}:effect:{index}",
-                kind=draft.kind,
-                account_id=self.capability.account_id,
-                destination_id=draft.destination_id,
-                target_ref=draft.target_ref,
-                rendered_payload_ref=payload_id,
-                payload_digest=canonical_digest(rendered),
-                capability_ref=RecordRef(id=self.capability.id, revision=self.capability.revision),
-            )
-            self.core.put_record(effect)
-            effects.append(effect)
+        effects = [effect for _, _, effect in prepared]
         plan = EffectPlan(
             id=f"plan:{work_id}:{proposal_revision}",
             revision=1,
@@ -648,12 +699,24 @@ class Coordinator:
                 revision=snapshot.producer_coverage_ref.revision,
             ),
         )
-        self.core.put_record(plan)
+        # Crash-atomic submit (yp): payloads, effects, the plan, and the
+        # submissions counter commit as one unit. In the old per-write
+        # transactions a crash mid-sequence left orphan effect/plan rows
+        # beside an un-incremented counter, so the recovery turn's next
+        # submission re-derived the same proposal_revision ids with a new
+        # created_at and raised RecordConflictError on every restart — a
+        # crash loop.
         with self.core.transaction() as connection:
+            for payload_id, data, effect in prepared:
+                self.core._put_payload_tx(connection, payload_id, data, owner_ref=f"work:{work_id}")
+                self.core._put_record_tx(connection, effect)
+            self.core._put_record_tx(connection, plan)
+            self.core._verify_ref_targets_tx(connection, (*effects, plan))
             connection.execute(
                 "UPDATE core_work SET submissions_used = submissions_used + 1 WHERE work_id = ?",
                 (work_id,),
             )
+            self._trip(CrashCheckpoint.DURING_SUBMIT_TX)
         decision = self.gate.evaluate(
             plan,
             context=GateContext(
@@ -926,7 +989,6 @@ class Coordinator:
             stem = f"{canonical_digest(goal_text)[:20]}:{suffix}"
             suffix += 1
         payload_id = f"payload:goal:{stem}"
-        self.core.put_payload(payload_id, goal_text, owner_ref="identity:agent")
         fragment = ContentFragment(
             id=f"fragment:goal:{stem}",
             revision=1,
@@ -952,10 +1014,6 @@ class Coordinator:
             commitment_refs=(),
             eligibility_status=EligibilityStatus.ACTIVE,
         )
-        try:
-            self.core.put_record(fragment)
-        except RecordConflictError as error:
-            raise PlanRejected(ReasonCode.CONFLICT, str(error)) from error
         intent = Intent(
             id=f"intent:agent:{stem}",
             revision=1,
@@ -973,8 +1031,18 @@ class Coordinator:
             expires_at=None,
             state=IntentState.OPEN,
         )
+        # Crash-atomic mint (yp): same one-transaction shape as the
+        # mechanical intent — no orphaned fixed-id fragment behind a lost
+        # intent.
         try:
-            self.core.put_record(intent)
+            with self.core.transaction() as connection:
+                self.core._put_payload_tx(
+                    connection, payload_id, goal_text, owner_ref="identity:agent"
+                )
+                self.core._put_record_tx(connection, fragment)
+                self.core._put_record_tx(connection, intent)
+                self.core._verify_ref_targets_tx(connection, (fragment, intent))
+                self._trip(CrashCheckpoint.DURING_INTENT_MINT)
         except RecordConflictError as error:
             raise PlanRejected(ReasonCode.CONFLICT, str(error)) from error
         return RecordRef(id=intent.id, revision=intent.revision)
@@ -987,9 +1055,6 @@ class Coordinator:
         if existing is not None:
             return RecordRef(id=existing.id, revision=existing.revision)
         payload_id = f"payload:goal:turn:{canonical_digest(work_id)[:16]}"
-        self.core.put_payload(
-            payload_id, f"participation for {work['trigger_key']}", owner_ref="identity:agent"
-        )
         fragment = ContentFragment(
             id=f"fragment:goal:turn:{canonical_digest(work_id)[:16]}",
             revision=1,
@@ -1015,10 +1080,6 @@ class Coordinator:
             commitment_refs=(),
             eligibility_status=EligibilityStatus.ACTIVE,
         )
-        try:
-            self.core.put_record(fragment)
-        except RecordConflictError as error:
-            raise PlanRejected(ReasonCode.CONFLICT, str(error)) from error
         intent = Intent(
             id=intent_id,
             revision=1,
@@ -1036,8 +1097,22 @@ class Coordinator:
             expires_at=None,
             state=IntentState.OPEN,
         )
+        # Crash-atomic mint (yp): payload, fragment, and intent commit as
+        # one unit — a crash between the old per-write commits left the
+        # fixed-id fragment behind without its intent, and the recovery
+        # re-mint surfaced that as a spurious CONFLICT hold.
         try:
-            self.core.put_record(intent)
+            with self.core.transaction() as connection:
+                self.core._put_payload_tx(
+                    connection,
+                    payload_id,
+                    f"participation for {work['trigger_key']}",
+                    owner_ref="identity:agent",
+                )
+                self.core._put_record_tx(connection, fragment)
+                self.core._put_record_tx(connection, intent)
+                self.core._verify_ref_targets_tx(connection, (fragment, intent))
+                self._trip(CrashCheckpoint.DURING_INTENT_MINT)
         except RecordConflictError as error:
             raise PlanRejected(ReasonCode.CONFLICT, str(error)) from error
         return RecordRef(id=intent.id, revision=intent.revision)

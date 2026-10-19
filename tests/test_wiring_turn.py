@@ -38,6 +38,7 @@ from agora.contracts import (
     Provenance,
     RecordRef,
     SourceKind,
+    canonical_digest,
 )
 from agora.coordinator import Coordinator
 from agora.fake_sidecar import FakeSidecar, FakeWorld
@@ -56,8 +57,15 @@ ANCHOR = "2026-10-10T12:00:00Z"
 class Stack:
     """The full M1 stack wired over fresh stores in a temp directory."""
 
-    def __init__(self, tmp: Path, steps: Sequence[MainStep]) -> None:
-        self.clock = VirtualClock(ANCHOR)
+    def __init__(
+        self,
+        tmp: Path,
+        steps: Sequence[MainStep],
+        *,
+        start_calls: int = 0,
+        start_ms: int = 0,
+    ) -> None:
+        self.clock = VirtualClock(ANCHOR, start_ms=start_ms)
         from agora.stores import CoreStore
 
         self.core = CoreStore(tmp / "core.sqlite")
@@ -72,7 +80,7 @@ class Stack:
         )
         self.identity, self.audience, self.capability = identity, audience, capability
         self.context_memory = ContextMemory(self.core, self.clock, self.injector)
-        self.main_port = ScriptedMainModel(steps)
+        self.main_port = ScriptedMainModel(steps, start_calls=start_calls)
         self.gate = CommitGate(self.core, self.clock)
         self.sidecar = FakeSidecar(self.core, self.transport, self.world, self.clock, self.injector)
         self.coordinator = Coordinator(
@@ -469,3 +477,116 @@ def test_timeout_delivery_reports_unknown_not_committed(tmp_path: Path) -> None:
     result = stack.coordinator.run_turn(work_id)
     assert result.outcome.kind == OutcomeKind.DELIVERY_UNKNOWN
     assert "DELIVERY_UNKNOWN" in [code.value for code in result.outcome.reason_codes]
+
+
+def test_submit_path_crash_is_atomic_and_recovers(tmp_path: Path) -> None:
+    """yp: a crash inside the submit transaction rolls back payloads,
+    effects, the plan, and the submissions counter together — the recovery
+    turn re-derives the same proposal revision cleanly instead of
+    conflicting with orphan rows on every restart (the old crash loop)."""
+    stack = Stack(tmp_path, [speak_step("atomic submit")])
+    feed_event(stack)
+    work_id = stack.coordinator.ready_work_ids()[0]
+    stack.injector.arm(CrashCheckpoint.DURING_SUBMIT_TX)
+    with pytest.raises(InjectedCrash):
+        stack.coordinator.run_turn(work_id)
+    # all-or-nothing: no orphan effects, plans, rendered bytes, or counter
+    # movement
+    assert stack.core.get_record(f"{work_id}:effect:1:0") is None
+    assert stack.core.get_record(f"plan:{work_id}:1") is None
+    assert stack.core.get_payload(f"payload:effect:{work_id}:1:0") is None
+    work = stack.core.get_work(work_id)
+    assert work is not None and work["submissions_used"] == 0
+
+    # Simulated process death; the accepted submit step never replays, the
+    # next scripted step re-derives proposal revision 1 from a clean slate.
+    # The clock advances across the restart so the re-derivation cannot
+    # ride the byte-identical dedup path.
+    stack.clock.advance_ms(50_000)
+    start_ms = stack.clock.now_ms()
+    stack.core.close()
+    stack.transport.close()
+    stack.world.close()
+    reopened = Stack(
+        tmp_path,
+        [speak_step("atomic submit"), speak_step("atomic submit")],
+        start_calls=1,
+        start_ms=start_ms,
+    )
+    assert reopened.coordinator.ready_work_ids() == (work_id,)
+    result = reopened.coordinator.run_turn(work_id)
+    assert result.outcome.kind == OutcomeKind.COMMITTED
+    work2 = reopened.core.get_work(work_id)
+    assert work2 is not None and work2["submissions_used"] == 1
+    assert reopened.transport.outbox_state(f"{work_id}:effect:0") == "SENT"
+
+
+def test_outcome_and_completion_commit_atomically(tmp_path: Path) -> None:
+    """yp: the terminal decisions, the fixed-id outcome record, and the
+    work completion UPDATE commit as one unit — a crash between the old
+    two-transaction writes orphaned outcome:{work}, and the recovery turn's
+    rewrite of the same id raised RecordConflictError on every restart.
+    The pre-crash dispatch stays durable either way."""
+    from agora.contracts import FinishChoice, ModelFinishStep
+
+    steps = [
+        speak_step("tail atomicity"),
+        ModelFinishStep(kind=MainStepKind.FINISH, outcome=FinishChoice.NO_ACTION),
+    ]
+    stack = Stack(tmp_path, steps)
+    feed_event(stack)
+    work_id = stack.coordinator.ready_work_ids()[0]
+    stack.injector.arm(CrashCheckpoint.DURING_COMPLETION_TX)
+    with pytest.raises(InjectedCrash):
+        stack.coordinator.run_turn(work_id)
+    assert stack.core.get_record(f"outcome:{work_id}") is None
+    work = stack.core.get_work(work_id)
+    assert work is not None and work["state"] == "RUNNING"
+    assert work["terminal_outcome_ref"] is None
+    # the dispatch committed before the tail: durable across the crash
+    assert stack.transport.outbox_state(f"{work_id}:effect:0") == "SENT"
+
+    stack.clock.advance_ms(50_000)
+    start_ms = stack.clock.now_ms()
+    stack.core.close()
+    stack.transport.close()
+    stack.world.close()
+    reopened = Stack(tmp_path, steps, start_calls=1, start_ms=start_ms)
+    result = reopened.coordinator.run_turn(work_id)
+    assert result.outcome.kind == OutcomeKind.NO_ACTION
+    work2 = reopened.core.get_work(work_id)
+    assert work2 is not None and work2["state"] == "COMPLETED"
+    assert work2["terminal_outcome_ref"] == f"outcome:{work_id}"
+    assert reopened.core.get_record(f"outcome:{work_id}") is not None
+
+
+def test_intent_mint_crash_rolls_back_cleanly(tmp_path: Path) -> None:
+    """yp: the mechanical intent mint (payload + fragment + intent) is one
+    transaction — a crash mid-mint leaves nothing behind, so the recovery
+    turn mints cleanly instead of surfacing a spurious CONFLICT hold
+    against an orphaned fixed-id fragment."""
+    stack = Stack(tmp_path, [speak_step("mint recovery")])
+    feed_event(stack)
+    work_id = stack.coordinator.ready_work_ids()[0]
+    stack.injector.arm(CrashCheckpoint.DURING_INTENT_MINT)
+    with pytest.raises(InjectedCrash):
+        stack.coordinator.run_turn(work_id)
+    assert stack.core.get_record(f"intent:turn:{work_id}") is None
+    orphan_fragments = stack.core._conn.execute(
+        "SELECT count(*) FROM core_records WHERE record_id LIKE 'fragment:goal:turn:%'"
+    ).fetchone()[0]
+    assert orphan_fragments == 0
+    goal_payload = f"payload:goal:turn:{canonical_digest(work_id)[:16]}"
+    assert stack.core.get_payload(goal_payload) is None
+    work = stack.core.get_work(work_id)
+    assert work is not None and work["main_steps_used"] == 0
+
+    stack.clock.advance_ms(50_000)
+    start_ms = stack.clock.now_ms()
+    stack.core.close()
+    stack.transport.close()
+    stack.world.close()
+    reopened = Stack(tmp_path, [speak_step("mint recovery")], start_ms=start_ms)
+    result = reopened.coordinator.run_turn(work_id)
+    assert result.outcome.kind == OutcomeKind.COMMITTED
+    assert reopened.core.get_record(f"intent:turn:{work_id}") is not None

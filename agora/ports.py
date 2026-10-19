@@ -80,7 +80,11 @@ def _format_utc(moment: datetime) -> str:
 
 
 class CrashCheckpoint(StrEnum):
-    """The eight named crash checkpoints (handoff §10)."""
+    """The eight named crash checkpoints (handoff §10) — which include
+    DURING_CANCEL and DURING_CORRECTION_JOB — plus the implementation
+    hooks DURING_SUBMIT_TX, DURING_COMPLETION_TX, and DURING_INTENT_MINT
+    for crash windows in coordinator write sequences the handoff does not
+    name (bead yps)."""
 
     AFTER_INGEST_BEFORE_ACK = "AFTER_INGEST_BEFORE_ACK"
     AFTER_MODEL_BEFORE_ACCEPT = "AFTER_MODEL_BEFORE_ACCEPT"
@@ -90,6 +94,9 @@ class CrashCheckpoint(StrEnum):
     AFTER_WORLD_BEFORE_RECEIPT = "AFTER_WORLD_BEFORE_RECEIPT"
     DURING_CANCEL = "DURING_CANCEL"
     DURING_CORRECTION_JOB = "DURING_CORRECTION_JOB"
+    DURING_SUBMIT_TX = "DURING_SUBMIT_TX"
+    DURING_COMPLETION_TX = "DURING_COMPLETION_TX"
+    DURING_INTENT_MINT = "DURING_INTENT_MINT"
 
 
 class CrashAction(Enum):
