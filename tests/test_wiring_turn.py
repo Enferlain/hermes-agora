@@ -374,9 +374,9 @@ def test_reaction_to_purged_target_payload_is_a_typed_hold(tmp_path: Path) -> No
 
 def test_defer_via_submit_plan_defers_the_intent(tmp_path: Path) -> None:
     """Review finding: a direct SUBMIT_PLAN(DEFER) resolution is honored
-    like the FINISH(DEFER) path — the intent gets its due time and the
-    turn ends DEFERRED, never silently swallowed."""
-    from agora.contracts import Disposition, ModelSubmitPlanStep
+    like the FINISH(DEFER) path — the intent gets the model's supplied
+    window and the turn ends DEFERRED, never silently swallowed."""
+    from agora.contracts import Disposition, Intent, ModelSubmitPlanStep
 
     defer_step = ModelSubmitPlanStep(
         kind=MainStepKind.SUBMIT_PLAN,
@@ -384,6 +384,8 @@ def test_defer_via_submit_plan_defers_the_intent(tmp_path: Path) -> None:
         disposition=Disposition.DEFER,
         effects=(),
         declared_fact_refs=(),
+        defer_until="2026-10-10T12:05:00Z",
+        defer_expires_at="2026-10-10T12:30:00Z",
     )
     stack = Stack(tmp_path, [defer_step])
     feed_event(stack)
@@ -391,9 +393,115 @@ def test_defer_via_submit_plan_defers_the_intent(tmp_path: Path) -> None:
     result = stack.coordinator.run_turn(work_id)
     assert result.outcome.kind == OutcomeKind.DEFERRED
     intent = stack.core.get_record(f"intent:turn:{work_id}")
+    assert isinstance(intent, Intent) and intent.state.value == "DEFERRED"
+    # the model's supplied window is what got stamped — a real future due,
+    # not a defer that expires the instant it is created
+    assert intent.due_at == "2026-10-10T12:05:00Z"
+    assert intent.expires_at == "2026-10-10T12:30:00Z"
+
+
+def _defer_step(defer_until: str, defer_expires_at: str) -> ModelSubmitPlanStep:
+    from agora.contracts import Disposition
+
+    return ModelSubmitPlanStep(
+        kind=MainStepKind.SUBMIT_PLAN,
+        intent_ref=RecordRef(id="intent:turn:work:turn:evt:1", revision=1),
+        disposition=Disposition.DEFER,
+        effects=(),
+        declared_fact_refs=(),
+        defer_until=defer_until,
+        defer_expires_at=defer_expires_at,
+    )
+
+
+def test_finish_defer_uses_the_runtime_window(tmp_path: Path) -> None:
+    """FINISH carries only the DEFER choice, so the runtime mints the
+    fixed-time window (§6.4): due at now + defer_window_ms, expiry at due
+    + defer_expiry_ms — a real future window, never a defer that expires
+    the instant it is created (bead 9xk)."""
+    from agora.contracts import EffectPlan, FinishChoice, Intent, ModelFinishStep
+
+    stack = Stack(tmp_path, [ModelFinishStep(kind=MainStepKind.FINISH, outcome=FinishChoice.DEFER)])
+    feed_event(stack)
+    work_id = stack.coordinator.ready_work_ids()[0]
+    result = stack.coordinator.run_turn(work_id)
+    assert result.outcome.kind == OutcomeKind.DEFERRED
+    intent = stack.core.get_record(f"intent:turn:{work_id}")
+    assert isinstance(intent, Intent) and intent.state.value == "DEFERRED"
+    # the clock sits at the anchor (12:00:00): +60s due, +300s expiry
+    assert intent.due_at == "2026-10-10T12:01:00Z"
+    assert intent.expires_at == "2026-10-10T12:06:00Z"
+    plan = stack.core.get_record(f"plan:{work_id}:1")
+    assert isinstance(plan, EffectPlan)
+    assert plan.defer_until == "2026-10-10T12:01:00Z"
+    assert plan.defer_expires_at == "2026-10-10T12:06:00Z"
+
+
+def test_timer_wake_resumes_the_deferred_intent(tmp_path: Path) -> None:
+    """Bead 9xk: the timer occurrence is a deduped TIMER_DUE journal event
+    whose work row binds to the deferred intent; the wake turn resumes
+    that intent DEFERRED → OPEN and runs under it, so the deferred goal's
+    commitments stay in the wake turn's routing inputs instead of silently
+    vanishing under a fresh mechanical intent."""
+    from agora.contracts import FinishChoice, Intent, ModelFinishStep
+
+    stack = Stack(
+        tmp_path,
+        [
+            _defer_step("2026-10-10T12:05:00Z", "2026-10-10T12:30:00Z"),
+            ModelFinishStep(kind=MainStepKind.FINISH, outcome=FinishChoice.NO_ACTION),
+        ],
+    )
+    feed_event(stack)
+    work_id = stack.coordinator.ready_work_ids()[0]
+    assert stack.coordinator.run_turn(work_id).outcome.kind == OutcomeKind.DEFERRED
+    intent_id = f"intent:turn:{work_id}"
+
+    # the timer fires (runner shape): one TIMER_DUE journal occurrence
+    timer_event_id = f"timer:{intent_id}:2026-10-10T12:05:00Z:1"
+    stack.transport.append_events(
+        (
+            JournalEntry(
+                journal_seq=2,
+                source_event_id=timer_event_id,
+                source_revision=1,
+                kind="TIMER_DUE",
+                payload_ref=f"payload:{timer_event_id}",
+                fragment_refs=(),
+                recovery="COMPLETE",
+            ),
+        )
+    )
+    stack.coordinator.ingest(stack.transport, consumer_id="core-1")
+
+    wake_ids = stack.coordinator.ready_work_ids()
+    assert len(wake_ids) == 1
+    wake_work = stack.core.get_work(wake_ids[0])
+    assert wake_work is not None and wake_work["intent_ref"] == intent_id
+
+    result = stack.coordinator.run_turn(wake_ids[0])
+    assert result.outcome.kind == OutcomeKind.NO_ACTION
+    # the wake ran under the RESUMED intent (OPEN again), not a fresh one
+    assert result.outcome.intent_ref is not None
+    assert result.outcome.intent_ref.id == intent_id
+    intent = stack.core.get_record(intent_id)
+    assert isinstance(intent, Intent) and intent.state.value == "OPEN"
+    assert result.outcome.intent_ref.revision == intent.revision
+
+
+def test_defer_expiry_preceding_due_is_a_typed_hold(tmp_path: Path) -> None:
+    """A defer whose expiry precedes its due can never wake — a typed
+    INVALID_SCHEMA rejection, never a silently-dead deferral."""
+    stack = Stack(tmp_path, [_defer_step("2026-10-10T12:30:00Z", "2026-10-10T12:05:00Z")])
+    feed_event(stack)
+    work_id = stack.coordinator.ready_work_ids()[0]
+    result = stack.coordinator.run_turn(work_id)
+    assert result.outcome.kind == OutcomeKind.HELD
+    assert "INVALID_SCHEMA" in [code.value for code in result.outcome.reason_codes]
+    intent = stack.core.get_record(f"intent:turn:{work_id}")
     from agora.contracts import Intent
 
-    assert isinstance(intent, Intent) and intent.due_at is not None
+    assert isinstance(intent, Intent) and intent.state.value == "OPEN"  # never deferred
 
 
 def test_malformed_access_request_is_a_typed_hold_not_a_crash(tmp_path: Path) -> None:

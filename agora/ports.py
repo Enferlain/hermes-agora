@@ -54,6 +54,17 @@ class VirtualClock:
     def now_rfc3339(self) -> str:
         return _format_utc(self._anchor + timedelta(milliseconds=self._now_ms))
 
+    def at_rfc3339(self, ms: int) -> str:
+        """Display time at an absolute virtual-ms offset from the anchor —
+        the runtime mints fixed-time defer windows with this (§6.4
+        fixed-time DEFER only)."""
+        return _format_utc(self._anchor + timedelta(milliseconds=ms))
+
+    def to_ms(self, rfc3339: str) -> int:
+        """Virtual ms of an absolute UTC timestamp relative to the anchor
+        (negative before it) — fixed-time defer dues compare on this."""
+        return round((_parse_utc(rfc3339) - self._anchor).total_seconds() * 1000)
+
     def persist(self, store: Any) -> None:
         """Write the current virtual ms into the core store's meta table."""
         store.set_meta("clock", self._now_ms)

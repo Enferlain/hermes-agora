@@ -110,6 +110,12 @@ class TurnConfig:
     #: wired from the manifest; a model CREATE_INTENT can only pick from
     #: it (bead njy).
     purpose_classes: frozenset[str] = frozenset({MECHANICAL_PURPOSE_CLASS})
+    #: The fixed-time defer window the runtime mints for a FINISH(DEFER)
+    #: resolution, which carries no times of its own (§6.4 fixed-time
+    #: DEFER only): due at now + defer_window_ms, expired (abandoned
+    #: without a visible effect) at due + defer_expiry_ms.
+    defer_window_ms: int = 60_000
+    defer_expiry_ms: int = 300_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,6 +325,7 @@ class Coordinator:
             )
 
         chosen_intent = intent_ref or self._work_intent(work_id, work)
+        chosen_intent = self._resume_deferred_intent(chosen_intent)
         self._ensure_work_item(work_id, work, chosen_intent)
         decision: CommitDecision | None = None
         receipt_ref: RecordRef | None = None
@@ -428,12 +435,25 @@ class Coordinator:
                                 outcome_kind = OutcomeKind.FAILED_INTERNAL
                                 reason_codes.append(ReasonCode.BUDGET_EXHAUSTED)
                             break
+                        # FINISH carries only the DEFER choice (§4.4), so the
+                        # runtime mints the fixed-time window itself; a
+                        # SUBMIT_PLAN(DEFER) supplies its own times.
+                        defer_until = self.clock.at_rfc3339(
+                            self.clock.now_ms() + self.config.defer_window_ms
+                        )
+                        defer_expires_at = self.clock.at_rfc3339(
+                            self.clock.now_ms()
+                            + self.config.defer_window_ms
+                            + self.config.defer_expiry_ms
+                        )
                         defer_step = ModelSubmitPlanStep(
                             kind=MainStepKind.SUBMIT_PLAN,
                             intent_ref=chosen_intent,
                             disposition=Disposition.DEFER,
                             effects=(),
                             declared_fact_refs=(),
+                            defer_until=defer_until,
+                            defer_expires_at=defer_expires_at,
                         )
                         decision, receipt_ref, refs = self._submit_plan(
                             work_id,
@@ -444,7 +464,9 @@ class Coordinator:
                         )
                         effect_refs.extend(refs)
                         if decision.kind == DecisionKind.DEFERRED:
-                            self._defer_intent(work_id, chosen_intent)
+                            self._defer_intent(
+                                work_id, chosen_intent, defer_until, defer_expires_at
+                            )
                             outcome_kind = OutcomeKind.DEFERRED
                             reason_codes = []
                             break
@@ -511,10 +533,13 @@ class Coordinator:
                         reason_codes = []
                     elif decision.kind == DecisionKind.DEFERRED:
                         # a SUBMIT_PLAN(DEFER) resolution defers exactly like
-                        # the FINISH(DEFER) path: the intent gets its due
-                        # time and the turn ends DEFERRED (review finding:
-                        # this branch was silently swallowed before)
-                        self._defer_intent(work_id, chosen_intent)
+                        # the FINISH(DEFER) path: the intent gets the model's
+                        # supplied window and the turn ends DEFERRED (review
+                        # finding: this branch was silently swallowed before)
+                        assert step.defer_until is not None and step.defer_expires_at is not None
+                        self._defer_intent(
+                            work_id, chosen_intent, step.defer_until, step.defer_expires_at
+                        )
                         outcome_kind = OutcomeKind.DEFERRED
                         reason_codes = []
                     if outcome_kind in (
@@ -652,6 +677,14 @@ class Coordinator:
         work = self.core.get_work(work_id)
         assert work is not None
         self._validate_model_refs(step)
+        if step.disposition == Disposition.DEFER:
+            assert step.defer_until is not None and step.defer_expires_at is not None
+            if self.clock.to_ms(step.defer_expires_at) < self.clock.to_ms(step.defer_until):
+                # A defer whose expiry precedes its due can never wake: a
+                # typed rejection, never a silently-dead deferral.
+                raise PlanRejected(
+                    ReasonCode.INVALID_SCHEMA, "defer_expires_at precedes defer_until"
+                )
         # Build phase (pure): rendering and validation raise PlanRejected
         # before anything is written, so a bad effect can no longer strand
         # the writes of its earlier siblings.
@@ -700,14 +733,15 @@ class Coordinator:
                     # silently travel to a plan built on another snapshot.
                     "snapshot": snapshot.id,
                     "coverage": snapshot.producer_coverage_ref.id,
+                    # §4.4 binds the defer window too: a PASS keyed to a
+                    # defer proposal cannot travel to the same defer with a
+                    # different due/expiry.
+                    "defer_until": step.defer_until,
+                    "defer_expires_at": step.defer_expires_at,
                 }
             ),
-            defer_until=(
-                self.clock.now_rfc3339() if step.disposition == Disposition.DEFER else None
-            ),
-            defer_expires_at=(
-                self.clock.now_rfc3339() if step.disposition == Disposition.DEFER else None
-            ),
+            defer_until=step.defer_until,
+            defer_expires_at=step.defer_expires_at,
             declared_fact_refs=tuple(step.declared_fact_refs),
             observed_target_refs=(),
             producer_coverage_ref=RecordRef(
@@ -967,30 +1001,53 @@ class Coordinator:
             )
         return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
-    def _defer_intent(self, work_id: str, intent_ref: RecordRef) -> None:
-        """Persist a deferred intent with an explicit due condition (fixed
-        time in this slice) — never a promise to reply. The DEFERRED decision
-        itself comes from the gate, which routed the defer plan."""
+    def _defer_intent(
+        self, work_id: str, intent_ref: RecordRef, defer_until: str, defer_expires_at: str
+    ) -> None:
+        """Persist a deferred intent with its explicit fixed-time window
+        (§6.1: DEFER requires an explicit due time and expiry; never a
+        promise to reply). The DEFERRED decision itself comes from the
+        gate, which routed the defer plan."""
         intent_record = self.core.get_record(intent_ref.id, intent_ref.revision)
         if isinstance(intent_record, Intent):
-            deferred = Intent(
-                id=intent_record.id,
-                revision=intent_record.revision + 1,
-                created_at=intent_record.created_at,
-                creator_ref=intent_record.creator_ref,
-                goal_fragment_ref=intent_record.goal_fragment_ref,
-                purpose_class=intent_record.purpose_class,
-                observed_trigger_refs=intent_record.observed_trigger_refs,
-                endorsement_revision=intent_record.endorsement_revision,
-                producer_coverage_ref=intent_record.producer_coverage_ref,
-                runtime_task_root_ids=intent_record.runtime_task_root_ids,
-                parent_work_ref=intent_record.parent_work_ref,
-                allowed_destination_refs=intent_record.allowed_destination_refs,
-                due_at=self.clock.now_rfc3339(),
-                expires_at=None,
+            deferred = _intent_revision(
+                intent_record,
                 state=IntentState.DEFERRED,
+                due_at=defer_until,
+                expires_at=defer_expires_at,
             )
             self.core.put_record(deferred)
+
+    def _resume_deferred_intent(self, intent_ref: RecordRef) -> RecordRef:
+        """The DEFERRED → OPEN transition (§6.1: exactly one deduped timer
+        occurrence resumes the intent). Any turn that adopts a DEFERRED
+        intent — the timer work row bound to it, or a fixture-named ref —
+        resumes it first, so the wake runs under the deferred goal's own
+        commitments instead of a fresh mechanical intent (bead 9xk). The
+        consumed defer window is cleared; idempotent by record CAS: a
+        crash after the bump re-derives an OPEN intent."""
+        record = self.core.get_record(intent_ref.id)
+        if not isinstance(record, Intent) or record.state != IntentState.DEFERRED:
+            return intent_ref
+        resumed = _intent_revision(record, state=IntentState.OPEN, clear_window=True)
+        self.core.put_record(resumed)
+        return RecordRef(id=resumed.id, revision=resumed.revision)
+
+    def abandon_intent(self, intent_ref: RecordRef) -> RecordRef:
+        """Expiry abandons a DEFERRED intent without a visible effect
+        (§6.4): one revision bump to ABANDONED, no work, no outcome. Any
+        other source state is a state-machine violation, not an expiry."""
+        record = self.core.get_record(intent_ref.id)
+        if not isinstance(record, Intent):
+            raise ValueError(f"intent {intent_ref.id} not found")
+        if record.state != IntentState.DEFERRED:
+            raise ValueError(
+                f"intent {intent_ref.id} is {record.state.value}, not DEFERRED:"
+                " only an expiry abandons"
+            )
+        abandoned = _intent_revision(record, state=IntentState.ABANDONED, clear_window=True)
+        self.core.put_record(abandoned)
+        return RecordRef(id=abandoned.id, revision=abandoned.revision)
 
     def _create_intent(self, goal_text: str, purpose_class: str) -> RecordRef:
         """Grantless autonomous intent creation (I01/D02): a valid goal from
@@ -1073,9 +1130,11 @@ class Coordinator:
         return RecordRef(id=intent.id, revision=intent.revision)
 
     def _work_intent(self, work_id: str, work: dict[str, Any]) -> RecordRef:
-        """Every turn runs under an intent; turns without a fixture intent
-        get a mechanical participation intent (no grant involved)."""
-        intent_id = f"intent:turn:{work_id}"
+        """Every turn runs under an intent: the work row's own intent_ref
+        when it names one (a timer wake bound to the deferred intent it
+        resumes, bead 9xk), else a mechanical participation intent minted
+        here (no grant involved)."""
+        intent_id = work["intent_ref"] or f"intent:turn:{work_id}"
         existing = self.core.get_record(intent_id)
         if existing is not None:
             return RecordRef(id=existing.id, revision=existing.revision)
@@ -1150,6 +1209,39 @@ _OUTCOME_AUDIT_CODES: dict[OutcomeKind, ReasonCode] = {
     OutcomeKind.DELIVERY_UNKNOWN: ReasonCode.DELIVERY_UNKNOWN,
     OutcomeKind.HELD: ReasonCode.REVIEW_CONCERN,
 }
+
+
+def _intent_revision(
+    record: Intent,
+    *,
+    state: IntentState,
+    due_at: str | None = None,
+    expires_at: str | None = None,
+    clear_window: bool = False,
+) -> Intent:
+    """One intent state transition as a new revision: every other field
+    carries over unchanged (handoff §6.1 intent state machine). A consumed
+    defer window (a resume or an expiry) is cleared rather than left as a
+    stale due that a future due-keyed query could resurrect."""
+    return Intent(
+        id=record.id,
+        revision=record.revision + 1,
+        created_at=record.created_at,
+        creator_ref=record.creator_ref,
+        goal_fragment_ref=record.goal_fragment_ref,
+        purpose_class=record.purpose_class,
+        observed_trigger_refs=record.observed_trigger_refs,
+        endorsement_revision=record.endorsement_revision,
+        producer_coverage_ref=record.producer_coverage_ref,
+        runtime_task_root_ids=record.runtime_task_root_ids,
+        parent_work_ref=record.parent_work_ref,
+        allowed_destination_refs=record.allowed_destination_refs,
+        due_at=None if clear_window else (record.due_at if due_at is None else due_at),
+        expires_at=None
+        if clear_window
+        else (record.expires_at if expires_at is None else expires_at),
+        state=state,
+    )
 
 
 def _audit_code(outcome: TurnOutcome) -> str | None:

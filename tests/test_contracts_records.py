@@ -517,6 +517,50 @@ def test_parse_model_step_unknown_kind_rejected() -> None:
         parse_model_step({"kind": "THINK_HARDER"})
 
 
+def test_submit_plan_defer_window_contract() -> None:
+    """Handoff §4.4: DEFER supplies defer_until and defer_expires_at
+    (fixed times), and only DEFER carries them (bead 9xk)."""
+    from agora.contracts import Disposition, MainStepKind, ModelSubmitPlanStep
+
+    def build(
+        disposition: str = "DEFER",
+        defer_until: str | None = "2026-10-10T12:05:00Z",
+        defer_expires_at: str | None = "2026-10-10T12:30:00Z",
+    ) -> ModelSubmitPlanStep:
+        return ModelSubmitPlanStep(
+            kind=MainStepKind.SUBMIT_PLAN,
+            intent_ref=RecordRef(id="intent:1", revision=1),
+            disposition=Disposition(disposition),
+            effects=(),
+            declared_fact_refs=(),
+            defer_until=defer_until,
+            defer_expires_at=defer_expires_at,
+        )
+
+    with pytest.raises(ValidationError):
+        build(defer_until=None)  # DEFER without times
+    with pytest.raises(ValidationError):
+        build(defer_until="not-a-time")
+    with pytest.raises(ValidationError):
+        build(disposition="QUIET")  # defer times on a non-DEFER plan
+
+    parsed = parse_model_step(
+        {
+            "kind": "SUBMIT_PLAN",
+            "intent_ref": {"id": "intent:1", "revision": 1},
+            "disposition": "DEFER",
+            "effects": [],
+            "declared_fact_refs": [],
+            "defer_until": "2026-10-10T12:05:00Z",
+            "defer_expires_at": "2026-10-10T12:30:00Z",
+        }
+    )
+    assert isinstance(parsed, ModelSubmitPlanStep)
+    assert parsed.disposition == Disposition.DEFER
+    assert parsed.defer_until == "2026-10-10T12:05:00Z"
+    assert parsed.defer_expires_at == "2026-10-10T12:30:00Z"
+
+
 def test_parse_model_step_finish_choices() -> None:
     step = parse_model_step({"kind": "FINISH", "outcome": "NO_ACTION"})
     assert step.kind == MainStepKind.FINISH

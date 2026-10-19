@@ -25,6 +25,18 @@ def test_clock_is_monotonic_and_anchored() -> None:
     assert clock.now_rfc3339() == "2026-10-10T00:00:01.500000Z"
 
 
+def test_clock_converts_anchor_relative_times() -> None:
+    """The fixed-time defer window conversions (§6.4): at_rfc3339 mints an
+    absolute display time at a virtual-ms offset, to_ms reads one back —
+    including before the anchor and with fractional seconds."""
+    clock = VirtualClock("2026-10-10T12:00:00Z")
+    assert clock.at_rfc3339(60_000) == "2026-10-10T12:01:00Z"
+    assert clock.at_rfc3339(1_500) == "2026-10-10T12:00:01.500000Z"
+    assert clock.to_ms("2026-10-10T12:01:00Z") == 60_000
+    assert clock.to_ms("2026-10-10T12:00:01.500000Z") == 1_500
+    assert clock.to_ms("2026-10-10T11:59:00Z") == -60_000
+
+
 def test_clock_cannot_move_backwards() -> None:
     clock = VirtualClock("2026-10-10T00:00:00Z", start_ms=100)
     with pytest.raises(ClockError):

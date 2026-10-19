@@ -5,6 +5,7 @@ advances the contiguous cursor before the transport acknowledgement."""
 from __future__ import annotations
 
 import hashlib
+import re
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -68,22 +69,37 @@ class IngestReceipt:
     blocked_missing: int | None
 
 
+#: TIMER_DUE event ids are (intent id, due, endorsement revision) (§8).
+#: The intent id and the RFC3339 due both contain colons, so the tuple is
+#: parsed structurally — a greedy intent match bounded by the timestamp
+#: shape — never by splitting.
+_TIMER_EVENT_ID = re.compile(
+    r"^timer:(?P<intent_id>.+):(?P<due>\d{4}-\d{2}-\d{2}T[0-9:.]+Z):(?P<endorsement>\d+)$"
+)
+
+
 def default_work_planner(entry: JournalEntry) -> WorkSeed | None:
     """Mechanical trigger-key mapping; coordinator policy replaces this later."""
     if entry.recovery == "GAP":
         return None
     if entry.kind == "TIMER_DUE":
+        # The wake work binds to the deferred intent it resumes, so the
+        # wake turn runs under that intent — not a fresh mechanical one
+        # (bead 9xk). A malformed id degrades to the mechanical mint.
         prefix = "timer"
+        match = _TIMER_EVENT_ID.match(entry.source_event_id)
+        intent_ref = match.group("intent_id") if match is not None else ""
     elif entry.kind == "CONNECTION_GAP":
         return None
     else:
         prefix = "turn"
+        intent_ref = ""
     trigger_key = f"{prefix}:{entry.source_event_id}"
     digest = hashlib.sha256(trigger_key.encode("utf-8")).hexdigest()[:20]
     return WorkSeed(
         work_id=f"work:{prefix}:{digest}",
         trigger_key=trigger_key,
-        intent_ref="",
+        intent_ref=intent_ref,
         episode_ref=None,
     )
 

@@ -113,6 +113,18 @@ class TransportStore(_Domain):
     def max_journal_seq(self) -> int:
         return int(self.get_meta("max_journal_seq") or 0)
 
+    def event_exists(self, source_event_id: str, source_revision: int) -> bool:
+        """Whether a journal occurrence was already appended — the timer
+        fire pass dedupes on this (§8: one occurrence per (intent, due,
+        endorsement) tuple, across restarts too)."""
+        return (
+            self._conn.execute(
+                "SELECT 1 FROM transport_events WHERE source_event_id = ? AND source_revision = ?",
+                (source_event_id, source_revision),
+            ).fetchone()
+            is not None
+        )
+
     # -- journal --------------------------------------------------------------
 
     def append_events(self, entries: tuple[JournalEntry, ...]) -> None:

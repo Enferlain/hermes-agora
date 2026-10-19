@@ -1102,10 +1102,12 @@ class ReplayRunner:
 
     def _fire_due_timers(self, trace: dict[str, Any]) -> None:
         """Deferred intents wake exactly once: a deduped TIMER_DUE occurrence
-        at the recorded due time (handoff §6.4 fixed-time defer)."""
+        at the recorded due time (handoff §6.4 fixed-time defer). An expired
+        deferral never fires — the intent is abandoned without a visible
+        effect instead (§8)."""
         rows = self.core._conn.execute(
             "SELECT record_id, payload_json FROM core_records"
-            " WHERE record_type = 'Intent' AND is_current = 1"
+            " WHERE record_type = 'Intent' AND is_current = 1 ORDER BY record_id"
         ).fetchall()
         next_seq = self.transport.max_journal_seq + 1
         for row in rows:
@@ -1115,9 +1117,25 @@ class ReplayRunner:
             due_at = payload.get("due_at")
             if not due_at:
                 continue
-            due_ms = self._rfc3339_to_ms(due_at)
-            self.clock.advance_to(due_ms)
+            due_ms = self.clock.to_ms(due_at)
+            if due_ms > self.clock.now_ms():
+                # the clock never moves backwards (§3): a due already past
+                # (coalesced ingest advanced past it) fires at once
+                self.clock.advance_to(due_ms)
+            expires_at = payload.get("expires_at")
+            if expires_at and self.clock.to_ms(expires_at) < self.clock.now_ms():
+                # expiry abandons without a visible effect (§8); the state
+                # check inside guards the §6.1 machine
+                self.coordinator.abandon_intent(RecordRef(id=row["record_id"], revision=1))
+                continue
             timer_event_id = f"timer:{row['record_id']}:{due_at}:{payload['endorsement_revision']}"
+            if self.transport.event_exists(timer_event_id, 1):
+                # One occurrence per (intent, due, endorsement) tuple, ever
+                # (§8): a re-defer to the same instant, or a restart while
+                # the wake is still pending, must not re-append the
+                # consumed journal entry — the unique constraint would
+                # crash the fire pass on every later attempt.
+                continue
             self.transport.append_events(
                 (
                     JournalEntry(
@@ -1143,10 +1161,3 @@ class ReplayRunner:
             " ORDER BY visible_at_ms"
         ).fetchall()
         return [dict(row) for row in rows]
-
-    def _rfc3339_to_ms(self, value: str) -> int:
-        from datetime import datetime
-
-        moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        anchor = datetime.fromisoformat(self.manifest.clock_anchor.replace("Z", "+00:00"))
-        return int((moment - anchor).total_seconds() * 1000)

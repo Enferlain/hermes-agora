@@ -224,6 +224,8 @@ class ModelSubmitPlanStep:
     disposition: Disposition
     effects: tuple[ModelEffectDraft, ...]
     declared_fact_refs: tuple[RecordRef, ...]
+    defer_until: str | None = None
+    defer_expires_at: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind != MainStepKind.SUBMIT_PLAN:
@@ -241,6 +243,18 @@ class ModelSubmitPlanStep:
         if self.disposition != Disposition.ACT and self.effects:
             raise ValidationError("QUIET and DEFER carry zero effects", path="effects")
         ref_tuple(self.declared_fact_refs, "declared_fact_refs")
+        if self.disposition == Disposition.DEFER:
+            # Handoff §4.4: DEFER supplies defer_until and
+            # defer_expires_at (fixed times; condition schedules remain
+            # UNSUPPORTED). The record contract re-checks on the plan.
+            if self.defer_until is None or self.defer_expires_at is None:
+                raise ValidationError(
+                    "DEFER supplies defer_until and defer_expires_at", path="defer_until"
+                )
+            check_utc(self.defer_until, path="defer_until")
+            check_utc(self.defer_expires_at, path="defer_expires_at")
+        elif self.defer_until is not None or self.defer_expires_at is not None:
+            raise ValidationError("defer times belong to DEFER plans only", path="defer_until")
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,6 +374,8 @@ def parse_model_step(data: object) -> MainStep:
             declared_fact_refs=tuple(
                 RecordRef.from_payload(item) for item in data.get("declared_fact_refs", ())
             ),
+            defer_until=data.get("defer_until"),
+            defer_expires_at=data.get("defer_expires_at"),
         )
     return ModelFinishStep(
         kind=step_kind, outcome=check_enum(data.get("outcome"), FinishChoice, "outcome")
