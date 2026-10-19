@@ -40,7 +40,7 @@ from agora.contracts import (
     SourceKind,
     canonical_digest,
 )
-from agora.coordinator import Coordinator
+from agora.coordinator import Coordinator, TurnConfig
 from agora.fake_sidecar import FakeSidecar, FakeWorld
 from agora.ports import (
     CrashCheckpoint,
@@ -64,6 +64,7 @@ class Stack:
         *,
         start_calls: int = 0,
         start_ms: int = 0,
+        config: TurnConfig | None = None,
     ) -> None:
         self.clock = VirtualClock(ANCHOR, start_ms=start_ms)
         from agora.stores import CoreStore
@@ -94,6 +95,7 @@ class Stack:
             audience=audience,
             capability=capability,
             sink_ref=sink_ref,
+            config=config,
             injector=self.injector,
         )
 
@@ -477,6 +479,66 @@ def test_timeout_delivery_reports_unknown_not_committed(tmp_path: Path) -> None:
     result = stack.coordinator.run_turn(work_id)
     assert result.outcome.kind == OutcomeKind.DELIVERY_UNKNOWN
     assert "DELIVERY_UNKNOWN" in [code.value for code in result.outcome.reason_codes]
+
+
+def test_create_intent_with_unregistered_purpose_class_is_a_typed_hold(tmp_path: Path) -> None:
+    """Bead njy: the purpose-class vocabulary is runtime-registered fixture
+    policy (handoff §4.5 — bounded strings used to MATCH a permission,
+    never evidence for issuing one). A model-invented class is a typed
+    POLICY_FORBIDDEN hold that completes the work; no intent record is
+    grounded, so no model-supplied string reaches authority evaluation."""
+    from agora.contracts import ModelCreateIntentStep
+
+    step = ModelCreateIntentStep(
+        kind=MainStepKind.CREATE_INTENT,
+        goal_text="get the protected ledger",
+        purpose_class="definitely-not-registered",
+        allowed_destination_ids=("room:public",),
+        due_at=None,
+        expires_at=None,
+    )
+    stack = Stack(tmp_path, [step])
+    feed_event(stack)
+    work_id = stack.coordinator.ready_work_ids()[0]
+    result = stack.coordinator.run_turn(work_id)
+    assert result.outcome.kind == OutcomeKind.HELD
+    assert "POLICY_FORBIDDEN" in [code.value for code in result.outcome.reason_codes]
+    agent_intents = stack.core._conn.execute(
+        "SELECT count(*) FROM core_records WHERE record_id LIKE 'intent:agent:%'"
+    ).fetchone()[0]
+    assert agent_intents == 0
+    work = stack.core.get_work(work_id)
+    assert work is not None and work["state"] == "COMPLETED"
+
+
+def test_create_intent_with_registered_purpose_class_grounds(tmp_path: Path) -> None:
+    """The positive branch: a class from the wired vocabulary grounds the
+    intent — registration restricts the vocabulary, it does not require a
+    grant (I01/D02: no grant prerequisite for intent creation)."""
+    from agora.contracts import ModelCreateIntentStep
+
+    step = ModelCreateIntentStep(
+        kind=MainStepKind.CREATE_INTENT,
+        goal_text="coordinate the project thread",
+        purpose_class="project-coordination",
+        allowed_destination_ids=("room:public",),
+        due_at=None,
+        expires_at=None,
+    )
+    stack = Stack(
+        tmp_path,
+        [step],
+        config=TurnConfig(
+            purpose_classes=frozenset({"social-participation", "project-coordination"})
+        ),
+    )
+    feed_event(stack)
+    work_id = stack.coordinator.ready_work_ids()[0]
+    stack.coordinator.run_turn(work_id)
+    grounded = stack.core._conn.execute(
+        "SELECT count(*) FROM core_records WHERE record_id LIKE 'intent:agent:%'"
+    ).fetchone()[0]
+    assert grounded == 1
 
 
 def test_submit_path_crash_is_atomic_and_recovers(tmp_path: Path) -> None:

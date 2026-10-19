@@ -6,7 +6,7 @@ Contextual discretion for the replay slice: who may know what, in which precisio
 
 ### Requirement: Domain-scoped authority evaluation
 
-Access evaluation matches AuthorityBindings, ResourcePolicy approval rules (SINGLE_ISSUER: one active eligible issuer suffices; ALL_LISTED: all configured issuers), and UseAuthorizations covering operation, data class, maximum precision, allowed transforms, permitted purpose classes, and audience class bounds. READ/TRANSFORM/REVIEW/STORE require RESOURCE_USE bindings; EXPRESS/OBSERVABLE_INFLUENCE require DISCLOSURE bindings. No principal kind, ownership, custody, subject count, or purpose rationale upgrades authority.
+Access evaluation matches AuthorityBindings, ResourcePolicy approval rules (SINGLE_ISSUER: one active eligible issuer suffices; ALL_LISTED: all configured issuers), and UseAuthorizations covering operation, data class, maximum precision, allowed transforms, permitted purpose classes, and audience class bounds. READ/TRANSFORM/REVIEW/STORE require RESOURCE_USE bindings; EXPRESS/OBSERVABLE_INFLUENCE require DISCLOSURE bindings. No principal kind, ownership, custody, subject count, or purpose rationale upgrades authority. Purpose classes are bounded strings from the manifest's registered vocabulary (`registries.purpose_classes`, plus the runtime's mechanical class): a model CREATE_INTENT may only pick a registered class — an unregistered class is a typed POLICY_FORBIDDEN hold and never reaches evaluation. A claimed class matches an existing permission; it is never evidence for issuing one.
 
 #### Scenario: Missing issuer authority
 
@@ -22,6 +22,11 @@ Access evaluation matches AuthorityBindings, ResourcePolicy approval rules (SING
 
 - **WHEN** a HUMAN_OPERATOR principal has no matching binding for a third-party confidential resource
 - **THEN** the evaluation denies exactly as it would for any other principal
+
+#### Scenario: Unregistered purpose class
+
+- **WHEN** a CREATE_INTENT step claims a purpose class absent from the registered vocabulary
+- **THEN** the step is a typed POLICY_FORBIDDEN hold, no intent is grounded, and no model-supplied class string reaches authority evaluation
 
 ### Requirement: Access status, view shape, and use are independent
 

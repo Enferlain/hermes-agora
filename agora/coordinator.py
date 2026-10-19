@@ -92,12 +92,24 @@ MAX_MAIN_STEPS = 8
 MAX_PLAN_SUBMISSIONS = 3
 MAX_MESSAGE_CHARS = 2000
 
+#: The purpose class the runtime mints for mechanical participation
+#: intents. Always registered — the default vocabulary is never empty, and
+#: section-less manifests still admit it — and a model CREATE_INTENT may
+#: claim it like any other registered class.
+MECHANICAL_PURPOSE_CLASS = "social-participation"
+
 
 @dataclass(frozen=True, slots=True)
 class TurnConfig:
     max_main_steps: int = MAX_MAIN_STEPS
     max_plan_submissions: int = MAX_PLAN_SUBMISSIONS
     max_message_chars: int = MAX_MESSAGE_CHARS
+    #: The registered purpose-class vocabulary (handoff §4.4: bounded
+    #: strings from the fixture registry, used to MATCH an existing
+    #: permission, never sufficient evidence for issuing one). Runtime-
+    #: wired from the manifest; a model CREATE_INTENT can only pick from
+    #: it (bead njy).
+    purpose_classes: frozenset[str] = frozenset({MECHANICAL_PURPOSE_CLASS})
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,7 +300,11 @@ class Coordinator:
     def run_turn(self, work_id: str, *, intent_ref: RecordRef | None = None) -> TurnResult:
         """Run one work item to a typed outcome. Steps are accepted with
         compare-and-set on the work counter, so a crash between model and
-        acceptance re-accepts at most one continuation per step (§7)."""
+        acceptance re-accepts at most one continuation per step (§7).
+        ``intent_ref`` is a fixture/test entry point for naming an
+        already-minted intent; it must not be wired to model input — the
+        model's step-level intent_ref is ignored, and every model-driven
+        intent goes through _create_intent's registry check."""
         work = self.core.get_work(work_id)
         if work is None:
             raise ValueError(f"work {work_id} not found")
@@ -979,10 +995,19 @@ class Coordinator:
     def _create_intent(self, goal_text: str, purpose_class: str) -> RecordRef:
         """Grantless autonomous intent creation (I01/D02): a valid goal from
         the authenticated agent creates an intent; no grant prerequisite.
-        The stem is the goal digest, uniquified per creation — the same
-        goal text may ground more than one intent over time (review
-        finding: the shared stem crashed record inserts on reuse) — and a
-        pathological id collision is a typed CONFLICT, never a crash."""
+        The purpose class must be REGISTERED (handoff §4.4: bounded strings
+        from the fixture registry, used to match an existing permission,
+        never sufficient evidence for issuing one) — a model-invented class
+        is a typed hold, so no model-supplied string reaches authority
+        evaluation (bead njy). The stem is the goal digest, uniquified per
+        creation — the same goal text may ground more than one intent over
+        time — and a pathological id collision is a typed CONFLICT, never a
+        crash."""
+        if purpose_class not in self.config.purpose_classes:
+            raise PlanRejected(
+                ReasonCode.POLICY_FORBIDDEN,
+                f"purpose class {purpose_class!r} is not in the registered vocabulary",
+            )
         stem = canonical_digest(goal_text)[:20]
         suffix = 2
         while self.core.get_record(f"intent:agent:{stem}") is not None:
@@ -1086,7 +1111,7 @@ class Coordinator:
             created_at=self.clock.now_rfc3339(),
             creator_ref=RecordRef(id=self.identity.principal_ref.id, revision=1),
             goal_fragment_ref=RecordRef(id=fragment.id, revision=fragment.revision),
-            purpose_class="social-participation",
+            purpose_class=MECHANICAL_PURPOSE_CLASS,
             observed_trigger_refs=(),
             endorsement_revision=1,
             producer_coverage_ref=None,

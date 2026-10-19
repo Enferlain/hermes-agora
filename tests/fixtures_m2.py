@@ -250,6 +250,10 @@ def five_class_registries() -> dict[str, Any]:
             {"id": "FIXED_AFFORDABILITY_PREDICATE", "parameters": [["price", 30]]},
             {"id": "FIXED_FIELD_VIEW", "parameters": [["fields", "available"]]},
         ],
+        # The registered purpose vocabulary (handoff §4.5): exactly the
+        # classes the fixture's authorizations match against, so scripted
+        # CREATE_INTENT steps can pick them and invented strings cannot.
+        "purpose_classes": ["social-participation", "project-coordination"],
     }
 
 

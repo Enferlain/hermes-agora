@@ -85,6 +85,30 @@ def test_seeded_replay_boots_and_roundtrips(tmp_path: Path) -> None:
     assert runner.transport.outbox_state("evt-boot") is None
 
 
+def test_purpose_class_registry_roundtrips_into_the_coordinator(tmp_path: Path) -> None:
+    """Bead njy: the manifest's purpose_classes section parses into the
+    registries and is wired (with the mechanical class) into the
+    coordinator's registered vocabulary — runtime-wired fixture policy,
+    the only source a model CREATE_INTENT can pick from."""
+    registries = five_class_registries()
+    assert registries["purpose_classes"] == ["social-participation", "project-coordination"]
+    manifest = RunManifest.from_payload(manifest_with_registries(registries))
+    assert manifest.registries.purpose_classes == ("social-participation", "project-coordination")
+    runner = ReplayRunner(manifest, tmp_path / "run")
+    from agora.coordinator import MECHANICAL_PURPOSE_CLASS
+
+    assert runner.coordinator.config.purpose_classes == frozenset(
+        {"social-participation", "project-coordination", MECHANICAL_PURPOSE_CLASS}
+    )
+
+
+def test_malformed_purpose_class_registry_fails_parsing() -> None:
+    registries = five_class_registries()
+    registries["purpose_classes"] = ["social-participation", 7]
+    with pytest.raises(ManifestError, match=r"registries\.purpose_classes"):
+        RunManifest.from_payload(manifest_with_registries(registries))
+
+
 def test_unknown_registry_id_fails_startup_with_nothing_seeded(tmp_path: Path) -> None:
     registries = five_class_registries()
     registries["commitments"][1]["policy_evidence"] = ["policy:ghost"]

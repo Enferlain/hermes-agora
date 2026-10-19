@@ -51,10 +51,12 @@ from agora.contracts import (
     ResourcePolicy,
     SourceKind,
     UseAuthorization,
+    ValidationError,
     canonical_json_bytes,
+    check_id,
     parse_model_step,
 )
-from agora.coordinator import Coordinator
+from agora.coordinator import MECHANICAL_PURPOSE_CLASS, Coordinator, TurnConfig
 from agora.fake_sidecar import FakeSidecar, FakeWorld
 from agora.ports import (
     CrashCheckpoint,
@@ -244,6 +246,11 @@ class Registries:
     bindings: tuple[BindingSeed, ...] = ()
     authorizations: tuple[AuthorizationSeed, ...] = ()
     transforms: tuple[TransformSeed, ...] = ()
+    #: The registered purpose-class vocabulary (handoff §4.4): the bounded
+    #: strings a model CREATE_INTENT may pick from — matched against
+    #: permissions, never evidence for issuing one. Distinct from each
+    #: authorization's own purpose_classes matching list (bead njy).
+    purpose_classes: tuple[str, ...] = ()
 
 
 def _require_fields(
@@ -309,6 +316,7 @@ def _parse_registries(data: object) -> Registries:
         "bindings",
         "authorizations",
         "transforms",
+        "purpose_classes",
     }
     if not set(data) <= sections:
         raise ManifestError(f"registries sections must be within {sorted(sections)}")
@@ -453,6 +461,19 @@ def _parse_registries(data: object) -> Registries:
     )
     for seed in transforms:
         validate_transform_parameters(seed.id, seed.parameters)
+    purpose_classes = (
+        _str_tuple(data["purpose_classes"], "registries.purpose_classes")
+        if "purpose_classes" in data
+        else ()
+    )
+    for name in purpose_classes:
+        # Every other manifest vocabulary fails at parse or seed time; a
+        # typo'd purpose class must too, not surface later as a mid-run
+        # POLICY_FORBIDDEN hold (registry entries must be claimable).
+        try:
+            check_id(name, path=f"registries.purpose_classes entry {name!r}")
+        except ValidationError as error:
+            raise ManifestError(str(error)) from error
     return Registries(
         principals=principals,
         resources=resources,
@@ -461,6 +482,7 @@ def _parse_registries(data: object) -> Registries:
         bindings=bindings,
         authorizations=authorizations,
         transforms=transforms,
+        purpose_classes=purpose_classes,
     )
 
 
@@ -877,6 +899,15 @@ class ReplayRunner:
             audience=audience,
             capability=capability,
             sink_ref=sink_ref,
+            # The manifest's registered purpose vocabulary, wired at
+            # runtime. The mechanical class is unioned in so manifests
+            # without a purpose_classes section still admit the class the
+            # runtime's mechanical intents — and section-less scripted
+            # CREATE_INTENT steps — use (bead njy).
+            config=TurnConfig(
+                purpose_classes=frozenset(self.manifest.registries.purpose_classes)
+                | {MECHANICAL_PURPOSE_CLASS}
+            ),
             injector=self.injector,
         )
 
