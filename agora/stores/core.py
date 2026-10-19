@@ -382,6 +382,38 @@ class CoreStore(_Domain):
                     " with different bytes"
                 ) from None
 
+    def _add_dependency_tx(
+        self,
+        connection: sqlite3.Connection,
+        child: RecordRef,
+        parent: RecordRef,
+        kind: DependencyKind,
+    ) -> None:
+        """The edge insert (with the acyclicity check) inside a caller-open
+        transaction, so a record and its dependency edges commit as one
+        unit — an invalidation walk never misses a persisted dependent."""
+        if child.id == parent.id:
+            raise DependencyCycleError("self-dependency is not allowed")
+        cycle = connection.execute(
+            """
+            WITH RECURSIVE ancestors(node) AS (
+                SELECT :parent_id
+                UNION
+                SELECT d.parent_ref FROM core_dependencies d
+                JOIN ancestors ON d.child_ref = ancestors.node
+            )
+            SELECT 1 FROM ancestors WHERE node = :child_id LIMIT 1
+            """,
+            {"parent_id": parent.id, "child_id": child.id},
+        ).fetchone()
+        if cycle is not None:
+            raise DependencyCycleError(f"edge {child.id} -> {parent.id} would create a cycle")
+        connection.execute(
+            "INSERT INTO core_dependencies (child_ref, parent_ref, dependency_kind)"
+            " VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
+            (child.id, parent.id, kind.value),
+        )
+
     def _verify_ref_targets_tx(
         self, connection: sqlite3.Connection, records: tuple[Record, ...]
     ) -> None:

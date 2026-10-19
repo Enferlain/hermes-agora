@@ -1254,9 +1254,11 @@ def test_view_revocation_invalidates_admitting_snapshots(tmp_path: Path) -> None
 
 
 def test_revocation_crash_rolls_back_and_retries(tmp_path: Path) -> None:
-    """The revocation's crash-rollback claim is pinned: a crash inside the
-    invalidation-job boundary leaves the view active and the snapshots
-    untouched, and the revocation re-runs cleanly."""
+    """The revocation's crash-rollback claim is pinned against a mid-walk
+    crash WITH pending writes: the invalidation-job boundary trips after
+    the revoked revisions are staged but before the invalidations, so the
+    crash must roll the whole revocation back (view active again,
+    snapshots untouched) and the re-run completes."""
     from agora.contracts import ContextSnapshot, DependencyKind, MemoryView, RecordStatus
     from agora.ports import CrashCheckpoint, InjectedCrash
     from tests.fixtures_review import (
@@ -1303,3 +1305,144 @@ def test_revocation_crash_rolls_back_and_retries(tmp_path: Path) -> None:
     invalidated = stack.core.get_record(snapshot.id)
     assert isinstance(invalidated, ContextSnapshot)
     assert invalidated.status.value == "INVALID"
+
+
+def test_revocation_cascades_through_transform_derived_views(tmp_path: Path) -> None:
+    """Bead 5e2 / I14 late derivations: revoking a granted view cascades
+    through its transform-derived output views (linked by the
+    request_access dependency edge), invalidates snapshots that admitted
+    anything in the withdrawn chain, and stales retained output memories
+    so the scope index stops serving the withdrawn data."""
+    from agora.contracts import (
+        AssertionStatus,
+        ContextSnapshot,
+        DependencyKind,
+        MemoryRecord,
+        MemoryStage,
+        MemoryStatus,
+        MemoryView,
+        RecordStatus,
+        ScopeKind,
+    )
+    from tests.fixtures_review import (
+        ReviewStack,
+        comparison_view,
+        feed_event,
+        make_intent,
+        review_snapshot,
+        seed_five_classes,
+    )
+
+    stack = ReviewStack(tmp_path)
+    seed_five_classes(stack)
+    feed_event(stack)
+    intent = make_intent(stack, "intent:cascade")
+    source = comparison_view(
+        stack,
+        "view:source",
+        call_id="call:cascade",
+        fragment_ref=RecordRef(id="fragment:evt:1", revision=1),
+        authorization_id="use:finance-fields",
+    )
+    derived = comparison_view(
+        stack,
+        "view:derived",
+        call_id="call:cascade",
+        fragment_ref=RecordRef(id="fragment:evt:1", revision=1),
+        authorization_id="use:finance-fields",
+    )
+    # a memory retained from what the views returned — the scope index
+    # would keep serving it unless revocation flips it STALE
+    stack.core.promote_memory(
+        MemoryRecord(
+            id="memory:retained",
+            revision=1,
+            created_at=stack.clock.now_rfc3339(),
+            assertion_fragment_ref=RecordRef(id="fragment:evt:1", revision=1),
+            stage=MemoryStage.SOCIAL,
+            scope_kind=ScopeKind.ROOM,
+            scope_ref="room:public",
+            custodian_refs=(),
+            subject_refs=(),
+            commitment_refs=(),
+            assertion_status=AssertionStatus.OBSERVED_STATEMENT,
+            supersedes_ref=None,
+            valid_until=None,
+            status=MemoryStatus.ACTIVE,
+        ),
+        expiry_ms=None,
+    )
+    snapshot = review_snapshot(stack, "call:cascade", intent, views=(source, derived))
+    stack.core.add_dependency(  # the derived view depends on its source
+        RecordRef(id=derived.id, revision=derived.revision),
+        RecordRef(id=source.id, revision=source.revision),
+        DependencyKind.PRODUCER_INPUT,
+    )
+    stack.core.add_dependency(
+        RecordRef(id=snapshot.id, revision=snapshot.revision),
+        RecordRef(id=derived.id, revision=derived.revision),
+        DependencyKind.PRODUCER_INPUT,
+    )
+
+    revoked = stack.context_memory.revoke_view(RecordRef(id=source.id, revision=1))
+    assert revoked.revision == 2
+    source_record = stack.core.get_record(source.id)
+    derived_record = stack.core.get_record(derived.id)
+    assert isinstance(source_record, MemoryView) and source_record.status == RecordStatus.REVOKED
+    assert isinstance(derived_record, MemoryView) and derived_record.status == RecordStatus.REVOKED
+    invalidated = stack.core.get_record(snapshot.id)
+    assert isinstance(invalidated, ContextSnapshot)
+    assert invalidated.status.value == "INVALID"  # it admitted the derived view
+    retained = stack.core.get_record("memory:retained")
+    assert isinstance(retained, MemoryRecord) and retained.status == MemoryStatus.STALE
+
+
+def test_snapshot_dependency_edges_are_complete_and_checked(tmp_path: Path) -> None:
+    """Bead 5e2: build_snapshot commits the snapshot, its coverage, and
+    its dependency edges as one unit, and check_invariants now verifies
+    edge completeness — the invariant walks find dependents through
+    exactly these edges."""
+    from agora.context_memory import ContextMemory
+    from agora.ports import VirtualClock
+    from agora.stores import CoreStore as Store
+    from agora.stores import TransportStore, check_invariants
+
+    core = Store(tmp_path / "core.sqlite")
+    transport = TransportStore(tmp_path / "transport.sqlite")
+    _snapshot_prereqs(core)
+    seed_memory(core, "memory:edges", scope_ref="room:a", text="an input the snapshot selects")
+    context = ContextMemory(core, VirtualClock(ANCHOR))
+    intent = make_intent_from_core(core)
+    snapshot = context.build_snapshot(
+        identity_ref=RecordRef(id="identity:agent", revision=1),
+        intent_ref=intent,
+        audience_ref=_audience_for(core, "room:a"),
+        episode_ref=None,
+        sink_ref=RecordRef(id="sink:scripted", revision=1),
+        effect_capable=False,
+        call_id="snap:edges",
+    )
+    assert snapshot.selected_fragment_refs  # the snapshot has inputs to cover
+    assert check_invariants(core, transport) == []
+
+    # tamper: drop one edge and the invariant must flag it
+    parent = snapshot.selected_fragment_refs[0].id
+    core._conn.execute(
+        "DELETE FROM core_dependencies WHERE child_ref = ? AND parent_ref = ?",
+        (snapshot.id, parent),
+    )
+    violations = check_invariants(core, transport)
+    assert any("missing the dependency edge" in violation for violation in violations)
+
+
+def make_intent_from_core(core) -> RecordRef:
+    import types
+    from typing import cast
+
+    from agora.ports import VirtualClock
+    from tests.fixtures_review import ReviewStack
+    from tests.fixtures_review import make_intent as fixture_intent
+
+    # make_intent touches only the clock and the core
+    stack = cast(ReviewStack, types.SimpleNamespace(clock=VirtualClock(ANCHOR), core=core))
+    return fixture_intent(stack, "intent:edges")

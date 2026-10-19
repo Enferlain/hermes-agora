@@ -249,8 +249,11 @@ def test_affordability_transform_exposes_predicate_only(tmp_path: Path) -> None:
     assert [ref.id for ref in certificate.discharged_commitment_refs] == ["commit:finance-strong"]
     assert certificate.retained_commitment_refs == ()
     assert [ref.id for ref in certificate.authorizing_use_refs] == ["use:finance-fields"]
-    # the authorized source view persists as the auditable basis
+    # the authorized source view persists as the auditable basis, and the
+    # production cascade edge exists: revoking the source must reach the
+    # transform output view (I14 late derivations, hermes-agora-5e2)
     assert core.get_record("view:probe:afford") is not None
+    assert "view:probe:afford" in core.parents_of("view:probe:afford:transform")
 
 
 def test_field_view_transform_discharges_nothing(tmp_path: Path) -> None:

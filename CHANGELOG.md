@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), with the change of using daily dated entries instead of releases.
 
+## 2026-10-18
+
+### Added
+
+- Revocation cascades through transform chains and the dependency-edge writes are atomic (beads hermes-agora-5e2, resolving the design questions filed during the l34 review): `request_access` records the PRODUCER_INPUT edge from each transform output view to its granted source IN THE SAME TRANSACTION as its record batch, so `revoke_view` withdraws the whole derived chain (I14 "late derivations"), invalidates snapshots that admitted anything in it, and stales retained output memories — the scope index stops serving the withdrawn data, exactly the "not just search indices" I14 names. The invalidation-job crash boundary trips between the cascade and invalidation phases, so the rollback property is pinned against a mid-walk crash with pending writes. `build_snapshot` persists the snapshot, its coverage, and all dependency edges as ONE core transaction (a new `_add_dependency_tx` keeps the acyclicity check inside the caller's transaction), so a crash can never leave a durable snapshot the invalidation walks cannot find; `check_invariants` verifies edge completeness for every current snapshot, flagging any future regression that splits those writes. The production cascade edge itself is pinned by assertion in the transform request test. GLM-flash review applied (0 critical/high; all four mediums fixed). 335 passed / 0 skipped via 'uv run pytest'; ruff/format/ty clean.
+
 ## 2026-10-17
 
 ### Added

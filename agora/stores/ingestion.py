@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from agora.contracts import (
+    ContextSnapshot,
     ConversationEpisode,
     EventKind,
     InboundEvent,
@@ -119,6 +120,24 @@ def check_invariants(core: CoreStore, transport: TransportStore) -> list[str]:
         violations.append("ingestion rows exist beyond the durable cursor")
     if transport.consumer_cursor > cursor:
         violations.append("transport ack cursor is ahead of the core cursor")
+    # Snapshot edge completeness (hermes-agora-5e2): every current
+    # snapshot's selected fragments and admitted views must have their
+    # PRODUCER_INPUT edges — the correction/revocation walks find dependents
+    # through exactly these, so a missing edge is a missed invalidation.
+    snapshots = core._conn.execute(
+        "SELECT record_id FROM core_records WHERE record_type = ? AND is_current = 1",
+        (ContextSnapshot.TYPE_NAME,),
+    ).fetchall()
+    for row in snapshots:
+        snapshot = core.get_record(row["record_id"])
+        if not isinstance(snapshot, ContextSnapshot):
+            continue
+        parents = set(core.parents_of(snapshot.id))
+        for ref in (*snapshot.selected_fragment_refs, *snapshot.active_view_refs):
+            if ref.id not in parents:
+                violations.append(
+                    f"snapshot {snapshot.id} is missing the dependency edge for {ref.id}"
+                )
     return violations
 
 

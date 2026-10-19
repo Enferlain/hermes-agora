@@ -322,7 +322,24 @@ class ContextMemory:
             *transform_records,
             result,
         )
-        self.core.put_records(batch)
+        # the batch AND the transform-output edge commit as ONE unit: a
+        # crash can no more leave the derived view durable without its
+        # cascade edge (the fail-open shape hermes-agora-5e2 closed for
+        # snapshots) than leave the batch half-written
+        with self.core.transaction() as connection:
+            for record in batch:
+                self.core._put_record_tx(connection, record)
+            self.core._verify_ref_targets_tx(connection, batch)
+            if source_view is not None and certificate is not None:
+                # the transform output derives from the granted view: the
+                # edge makes revocation of the source cascade to it (I14
+                # late derivations, hermes-agora-5e2)
+                self.core._add_dependency_tx(
+                    connection,
+                    certificate.output_view_ref,
+                    RecordRef(id=source_view.id, revision=source_view.revision),
+                    DependencyKind.PRODUCER_INPUT,
+                )
         if not granted and verdict.reason_codes:
             # Replay-dedup: records re-insert byte-identically, but the
             # audit log has no natural key — skip the row if the same
@@ -882,16 +899,19 @@ class ContextMemory:
         pass revalidation on a stale admission. The dependency edges
         build_snapshot writes make the dependents findable; the snapshot's
         own active_view_refs decide the match (the version vector cites
-        fragments, not views). The revocation and its invalidation walk
-        are ONE core transaction, mirroring correct_memory: a crash
-        (DURING_CORRECTION_JOB — the invalidation-job boundary) rolls back
-        to the pre-revocation state and the revocation re-runs."""
-        current = self.core.current_ref(view_ref.id)
-        if current is None:
+        fragments, not views). The revocation, its cascade through
+        transform-derived views, the stale-flip of retained output
+        memories, and the snapshot invalidations are ONE core transaction,
+        mirroring correct_memory: a mid-walk crash (DURING_CORRECTION_JOB
+        — the invalidation-job boundary, tripped between the cascade and
+        the invalidation phases) rolls every write back to the
+        pre-revocation state and the revocation re-runs."""
+        standing = self.core.current_ref(view_ref.id)
+        if standing is None:
             raise MemoryStateError(
                 ReasonCode.INVALID_REFERENCE, f"view {view_ref.id} does not exist"
             )
-        view = self.core.get_record(view_ref.id, current.revision)
+        view = self.core.get_record(view_ref.id, standing.revision)
         if not isinstance(view, MemoryView):
             raise MemoryStateError(
                 ReasonCode.INVALID_REFERENCE, f"{view_ref.id} is not a memory view"
@@ -903,35 +923,73 @@ class ContextMemory:
             # standing revocation is exactly the crash-retry idempotence
             # this path needs (unlike memories, which correct_memory
             # guards because promotions move them forward).
-            return current
+            return standing
         now = self.clock.now_rfc3339()
         written: list[Record] = []
         with self.core.transaction() as connection:
-            revoked = replace(
-                view, revision=view.revision + 1, created_at=now, status=RecordStatus.REVOKED
-            )
-            self.core._put_record_tx(connection, revoked)
-            written.append(revoked)
-            self._trip(CrashCheckpoint.DURING_CORRECTION_JOB)
-            for child_id in self.core.children_of(view.id):
-                record = self.core.get_record(child_id)
-                if not isinstance(record, ContextSnapshot):
+            # the revocation cascades through transform-derived views (I14
+            # late derivations): the request_access edge makes each output
+            # view a dependent of its granted source, so withdrawing the
+            # source withdraws the whole chain
+            pending = [view]
+            revoked_ids: set[str] = set()
+            revoked_views: dict[str, MemoryView] = {}
+            while pending:
+                node = pending.pop()
+                if node.id in revoked_ids:
                     continue
-                if not any(ref.id == view.id for ref in record.active_view_refs):
-                    continue
-                # no INVALID-status guard, matching _invalidate_from's
-                # snapshot branch: re-flipping an already-invalid snapshot
-                # only churns a revision and can never reopen dispatch
-                invalid = replace(
-                    record,
-                    revision=record.revision + 1,
+                revoked = replace(
+                    node,
+                    revision=node.revision + 1,
                     created_at=now,
-                    status=SnapshotStatus.INVALID,
+                    status=RecordStatus.REVOKED,
                 )
-                self.core._put_record_tx(connection, invalid)
-                written.append(invalid)
+                self.core._put_record_tx(connection, revoked)
+                written.append(revoked)
+                revoked_ids.add(node.id)
+                revoked_views[node.id] = node
+                for child_id in self.core.children_of(node.id):
+                    record = self.core.get_record(child_id)
+                    if (
+                        isinstance(record, MemoryView)
+                        and record.status != RecordStatus.REVOKED
+                        and record.id not in revoked_ids
+                    ):
+                        pending.append(record)
+            # the invalidation-job crash boundary: writes above this line
+            # (the revoked revisions) are what a crash must roll back
+            self._trip(CrashCheckpoint.DURING_CORRECTION_JOB)
+            invalidated: set[str] = set()
+            for revoked_id, revoked_view in revoked_views.items():
+                # retained output memories of what the views returned stop
+                # being eligible: the scope index is exactly the "search
+                # index" I14 says must not keep serving withdrawn data
+                for fragment_ref in revoked_view.returned_fragment_refs:
+                    self._stale_output_memory(connection, fragment_ref, now, written)
+                for child_id in self.core.children_of(revoked_id):
+                    record = self.core.get_record(child_id)
+                    if not isinstance(record, ContextSnapshot):
+                        continue
+                    if record.id in invalidated:
+                        continue
+                    if not any(ref.id in revoked_ids for ref in record.active_view_refs):
+                        continue
+                    # no INVALID-status guard, matching _invalidate_from's
+                    # snapshot branch: re-flipping an already-invalid
+                    # snapshot only churns a revision and can never reopen
+                    # dispatch
+                    invalid = replace(
+                        record,
+                        revision=record.revision + 1,
+                        created_at=now,
+                        status=SnapshotStatus.INVALID,
+                    )
+                    self.core._put_record_tx(connection, invalid)
+                    written.append(invalid)
+                    invalidated.add(record.id)
             self.core._verify_ref_targets_tx(connection, tuple(written))
-        return RecordRef(id=revoked.id, revision=revoked.revision)
+            root = written[0]
+        return RecordRef(id=root.id, revision=root.revision)
 
     def _current_memory_or_error(self, memory_ref: RecordRef) -> MemoryRecord:
         current = self.core.current_ref(memory_ref.id)
@@ -1113,7 +1171,6 @@ class ContextMemory:
             call_id=call_id,
             runtime_epoch=self.core.runtime_epoch,
         )
-        self.core.put_record(coverage)
         snapshot = ContextSnapshot(
             id=f"snapshot:{call_id}",
             revision=1,
@@ -1133,13 +1190,18 @@ class ContextMemory:
             serializer_version=self.serializer_version,
             status=SnapshotStatus.ACTIVE,
         )
-        self.core.put_record(snapshot)
-        for ref in (*selected, *admitted_refs):
-            self.core.add_dependency(
-                RecordRef(id=snapshot.id, revision=snapshot.revision),
-                ref,
-                DependencyKind.PRODUCER_INPUT,
-            )
+        # the snapshot, its coverage, and the dependency edges the
+        # invalidation walks rely on commit as ONE unit: a crash can never
+        # leave a durable snapshot with missing edges (hermes-agora-5e2)
+        with self.core.transaction() as connection:
+            self.core._put_record_tx(connection, coverage)
+            self.core._put_record_tx(connection, snapshot)
+            self.core._verify_ref_targets_tx(connection, (coverage, snapshot))
+            snapshot_ref = RecordRef(id=snapshot.id, revision=snapshot.revision)
+            for ref in (*selected, *admitted_refs):
+                self.core._add_dependency_tx(
+                    connection, snapshot_ref, ref, DependencyKind.PRODUCER_INPUT
+                )
         return snapshot
 
     def _admit_views(
