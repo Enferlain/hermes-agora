@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), with the change of using daily dated entries instead of releases.
 
+## 2026-10-20
+
+### Fixed
+
+- The coordinator-review LOW/NIT bundle (bead hermes-agora-xek): the gate now enforces the message-length limit on the RENDERED bytes (the effect monopoly — a payload whose digest is intact can no longer smuggle length past draft rendering); dispatch revalidation verifies a reaction target still hashes to the content digest bound in the rendered bytes, so a purge — which zeroes bytes at the SAME revision the revision-only TARGET_CHANGED check compares — holds with TARGET_CHANGED and nothing sends; run_turn validates its fixture intent_ref entry point and its episode resolution BEFORE the RUNNING transition (a dangling intent ref or missing episode is a loud input error with the work left READY and nothing half-minted — never a silently-fresh mechanical intent, and never first-run-vs-replay drift; _ensure_work_item takes the validated ref instead of re-resolving); CREATE_INTENT honors the model's destination bounds (narrow-only — a widening claim is a typed POLICY_FORBIDDEN hold; an absent list means capability-wide) and due/expiry window (expiry preceding due rejected), no longer silently discarding them; and the proposal_digest's omission of declared_fact_refs is recorded as the architecture-level decision it is (§4.4 marks them advisory and its digest field list omits them — unverified advisory cites do not carry the proposal's identity). PARTICIPATE/ADOPT_PREFERENCE payloads remain accepted-but-discarded, filed as hermes-agora-c4b for the agent-state design. GLM-flash review applied (0 critical/high; both mediums were test-strength defects — a vacuous episode regression now asserting READY/no-mint, and a purge regression that held on a guessed payload id, now bound from the target fragment's own payload_ref like the coordinator rule it pins). 362 passed / 0 skipped via 'uv run pytest'; ruff/format/ty clean.
+
 ## 2026-10-19
 
 ### Fixed

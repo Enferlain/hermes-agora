@@ -856,3 +856,116 @@ def test_intent_mint_crash_rolls_back_cleanly(tmp_path: Path) -> None:
     result = reopened.coordinator.run_turn(work_id)
     assert result.outcome.kind == OutcomeKind.COMMITTED
     assert reopened.core.get_record(f"intent:turn:{work_id}") is not None
+
+
+def test_run_turn_validates_the_fixture_intent_ref(tmp_path: Path) -> None:
+    """Bead xek-8: the fixture intent_ref entry point is validated — a
+    dangling ref is a loud input error raised BEFORE the RUNNING
+    transition (the work stays READY), never a silently-fresh mechanical
+    intent downstream."""
+    stack = Stack(tmp_path, [speak_step("validated entry")])
+    feed_event(stack)
+    work_id = stack.coordinator.ready_work_ids()[0]
+    with pytest.raises(ValueError, match="does not resolve to an Intent"):
+        stack.coordinator.run_turn(work_id, intent_ref=RecordRef(id="intent:ghost", revision=1))
+    work = stack.core.get_work(work_id)
+    assert work is not None and work["state"] == "READY"  # not stranded RUNNING
+
+
+def test_missing_episode_raises_before_and_after_the_work_item(tmp_path: Path) -> None:
+    """Bead xek-9: a work row citing a missing episode raises the same
+    ValueError whether or not the WorkItem record exists — the check now
+    lives in run_turn BEFORE the transition and the WorkItem mint, so the
+    row stays READY (no stranded lease) and nothing is half-minted. The
+    row is unrunnable until its episode exists or it is removed — the
+    loud-error contract for fixture-level input damage."""
+    stack = Stack(tmp_path, [speak_step("no episode")])
+    created = stack.core.create_work(
+        work_id="work:ghost-ep",
+        trigger_key="turn:evt:ghost",
+        intent_ref="",
+        episode_ref="episode:ghost",
+        runtime_epoch=stack.core.runtime_epoch,
+    )
+    assert created
+    with pytest.raises(ValueError, match="cites missing episode"):
+        stack.coordinator.run_turn("work:ghost-ep")
+    # the fix's actual behavior: raised pre-transition (READY, no lease)
+    work = stack.core.get_work("work:ghost-ep")
+    assert work is not None and work["state"] == "READY"
+    assert work["lease_owner"] is None
+    # and nothing was half-minted downstream of the check
+    assert stack.core.get_record("intent:turn:work:ghost-ep") is None
+
+
+def test_create_intent_honors_destination_bounds_and_window(tmp_path: Path) -> None:
+    """Bead xek-13: the model's CREATE_INTENT destination bounds and
+    due/expiry window are honored on the grounded intent — no longer
+    silently discarded."""
+    from agora.contracts import Intent, ModelCreateIntentStep
+
+    step = ModelCreateIntentStep(
+        kind=MainStepKind.CREATE_INTENT,
+        goal_text="the narrow thread",
+        purpose_class="social-participation",
+        allowed_destination_ids=("room:public",),
+        due_at="2026-10-10T12:10:00Z",
+        expires_at="2026-10-10T13:00:00Z",
+    )
+    stack = Stack(tmp_path, [step])
+    feed_event(stack)
+    work_id = stack.coordinator.ready_work_ids()[0]
+    stack.coordinator.run_turn(work_id)
+    intent_row = stack.core._conn.execute(
+        "SELECT record_id FROM core_records WHERE record_id LIKE 'intent:agent:%'"
+        " AND is_current = 1"
+    ).fetchone()
+    assert intent_row is not None
+    intent = stack.core.get_record(intent_row["record_id"])
+    assert isinstance(intent, Intent)
+    assert intent.allowed_destination_refs == ("room:public",)
+    assert intent.due_at == "2026-10-10T12:10:00Z"
+    assert intent.expires_at == "2026-10-10T13:00:00Z"
+
+
+def test_create_intent_widening_destinations_is_a_typed_hold(tmp_path: Path) -> None:
+    """The model may only NARROW the capability's destinations: a claim
+    outside them is a typed POLICY_FORBIDDEN hold, never a widened
+    intent."""
+    from agora.contracts import ModelCreateIntentStep
+
+    step = ModelCreateIntentStep(
+        kind=MainStepKind.CREATE_INTENT,
+        goal_text="the widened thread",
+        purpose_class="social-participation",
+        allowed_destination_ids=("room:secret",),
+        due_at=None,
+        expires_at=None,
+    )
+    stack = Stack(tmp_path, [step])
+    feed_event(stack)
+    work_id = stack.coordinator.ready_work_ids()[0]
+    result = stack.coordinator.run_turn(work_id)
+    assert result.outcome.kind == OutcomeKind.HELD
+    assert "POLICY_FORBIDDEN" in [code.value for code in result.outcome.reason_codes]
+
+
+def test_create_intent_expiry_preceding_due_is_a_typed_hold(tmp_path: Path) -> None:
+    """Same window rule as defer plans: an intent whose expiry precedes
+    its due can never become timely — a typed INVALID_SCHEMA rejection."""
+    from agora.contracts import ModelCreateIntentStep
+
+    step = ModelCreateIntentStep(
+        kind=MainStepKind.CREATE_INTENT,
+        goal_text="the inverted window",
+        purpose_class="social-participation",
+        allowed_destination_ids=("room:public",),
+        due_at="2026-10-10T12:10:00Z",
+        expires_at="2026-10-10T12:00:00Z",
+    )
+    stack = Stack(tmp_path, [step])
+    feed_event(stack)
+    work_id = stack.coordinator.ready_work_ids()[0]
+    result = stack.coordinator.run_turn(work_id)
+    assert result.outcome.kind == OutcomeKind.HELD
+    assert "INVALID_SCHEMA" in [code.value for code in result.outcome.reason_codes]

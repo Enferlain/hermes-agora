@@ -325,6 +325,26 @@ class Coordinator:
             raise ValueError(f"work {work_id} not found")
         if work["state"] != WorkState.READY.value:
             raise ValueError(f"work {work_id} is not READY")
+        # Input validation happens BEFORE the RUNNING transition, so a bad
+        # input leaves the work READY instead of stranded with a lease.
+        if intent_ref is not None and not isinstance(
+            self.core.get_record(intent_ref.id, intent_ref.revision), Intent
+        ):
+            # The fixture entry point is validated like every other ref
+            # (xek-8): a dangling intent_ref is a loud input error, never
+            # a silently-fresh mechanical intent downstream.
+            raise ValueError(
+                f"run_turn intent_ref {intent_ref.id} revision {intent_ref.revision}"
+                " does not resolve to an Intent"
+            )
+        episode_ref = None
+        if work["episode_ref"] is not None:
+            episode_ref = self.core.current_ref(work["episode_ref"])
+            if episode_ref is None:
+                # Same input, same behavior on first run and replay (xek-9):
+                # the episode check is not conditional on whether the
+                # WorkItem record was already written.
+                raise ValueError(f"work {work_id} cites missing episode {work['episode_ref']}")
         self.core.transition_work(work_id, WorkState.RUNNING, expected_state=WorkState.READY)
         with self.core.transaction() as connection:
             connection.execute(
@@ -335,7 +355,7 @@ class Coordinator:
 
         chosen_intent = intent_ref or self._work_intent(work_id, work)
         chosen_intent = self._resume_deferred_intent(chosen_intent)
-        self._ensure_work_item(work_id, work, chosen_intent)
+        self._ensure_work_item(work_id, work, chosen_intent, episode_ref)
         decision: CommitDecision | None = None
         receipt_ref: RecordRef | None = None
         outcome_kind: OutcomeKind | None = None
@@ -344,9 +364,6 @@ class Coordinator:
         # usable, and typed notices the next model step sees in its envelope.
         held_view_refs: list[RecordRef] = []
         notices: list[str] = []
-        episode_ref = None
-        if work["episode_ref"] is not None:
-            episode_ref = self.core.current_ref(work["episode_ref"])
         effect_refs: list[RecordRef] = []
         # Coordinator-minted terminal decisions commit with the outcome in
         # one transaction at turn end (yp): written mid-turn they would sit
@@ -577,7 +594,7 @@ class Coordinator:
                     notices.append(f"memory:{memory_ref.id}:stored")
                     continue
                 elif isinstance(step, ModelCreateIntentStep):
-                    chosen_intent = self._create_intent(step.goal_text, step.purpose_class)
+                    chosen_intent = self._create_intent(step)
                     continue
                 # PARTICIPATE / others: record and continue the loop.
                 continue
@@ -657,18 +674,22 @@ class Coordinator:
 
     # -- plan handling --------------------------------------------------------
 
-    def _ensure_work_item(self, work_id: str, work: dict[str, Any], intent_ref: RecordRef) -> None:
+    def _ensure_work_item(
+        self,
+        work_id: str,
+        work: dict[str, Any],
+        intent_ref: RecordRef,
+        episode_ref: RecordRef | None,
+    ) -> None:
         """Persist the §4.2 WorkItem record once per work item, at turn start
-        under the resolved intent. Written lazily (mechanical work resolves
-        its intent only here) and never rewritten — crash replay skips it,
-        so the epoch-bearing bytes can never conflict with themselves."""
+        under the resolved intent and the already-validated episode ref
+        (run_turn resolved it before the RUNNING transition — no second
+        resolution, no second check). Written lazily (mechanical work
+        resolves its intent only here) and never rewritten — crash replay
+        skips it, so the epoch-bearing bytes can never conflict with
+        themselves."""
         if self.core.get_record(work_id) is not None:
             return
-        episode_ref = None
-        if work["episode_ref"] is not None:
-            episode_ref = self.core.current_ref(work["episode_ref"])
-            if episode_ref is None:
-                raise ValueError(f"work {work_id} cites missing episode {work['episode_ref']}")
         item = WorkItem(
             id=work_id,
             revision=1,
@@ -759,6 +780,11 @@ class Coordinator:
                     # different due/expiry.
                     "defer_until": step.defer_until,
                     "defer_expires_at": step.defer_expires_at,
+                    # declared_fact_refs are deliberately NOT bound (xek-10,
+                    # decided at the architecture level): §4.4 marks them
+                    # advisory and its digest field list omits them —
+                    # unverified advisory cites do not carry the proposal's
+                    # identity.
                 }
             ),
             defer_until=step.defer_until,
@@ -1070,22 +1096,48 @@ class Coordinator:
         self.core.put_record(abandoned)
         return RecordRef(id=abandoned.id, revision=abandoned.revision)
 
-    def _create_intent(self, goal_text: str, purpose_class: str) -> RecordRef:
+    def _create_intent(self, step: ModelCreateIntentStep) -> RecordRef:
         """Grantless autonomous intent creation (I01/D02): a valid goal from
         the authenticated agent creates an intent; no grant prerequisite.
         The purpose class must be REGISTERED (handoff §4.4: bounded strings
         from the fixture registry, used to match an existing permission,
         never sufficient evidence for issuing one) — a model-invented class
         is a typed hold, so no model-supplied string reaches authority
-        evaluation (bead njy). The stem is the goal digest, uniquified per
-        creation — the same goal text may ground more than one intent over
-        time — and a pathological id collision is a typed CONFLICT, never a
-        crash."""
-        if purpose_class not in self.config.purpose_classes:
+        evaluation (bead njy). The model's destination bounds may only
+        NARROW the capability's (a widening claim is a typed rejection),
+        and its due/expiry window is honored after validation (§4.4; xek-13
+        — the fields are no longer silently discarded). The stem is the
+        goal digest, uniquified per creation — the same goal text may
+        ground more than one intent over time — and a pathological id
+        collision is a typed CONFLICT, never a crash."""
+        if step.purpose_class not in self.config.purpose_classes:
             raise PlanRejected(
                 ReasonCode.POLICY_FORBIDDEN,
-                f"purpose class {purpose_class!r} is not in the registered vocabulary",
+                f"purpose class {step.purpose_class!r} is not in the registered vocabulary",
             )
+        allowed_destinations = self.capability.allowed_destination_ids
+        if step.allowed_destination_ids:
+            # An absent (or empty) list means capability-wide: the bounds
+            # are optional narrowing, not a required field. The capability
+            # stays the ceiling either way.
+            widening = [
+                destination
+                for destination in step.allowed_destination_ids
+                if destination not in allowed_destinations
+            ]
+            if widening:
+                raise PlanRejected(
+                    ReasonCode.POLICY_FORBIDDEN,
+                    f"destinations outside the capability: {widening}",
+                )
+            allowed_destinations = tuple(step.allowed_destination_ids)
+        if (
+            step.due_at is not None
+            and step.expires_at is not None
+            and self.clock.to_ms(step.expires_at) < self.clock.to_ms(step.due_at)
+        ):
+            raise PlanRejected(ReasonCode.INVALID_SCHEMA, "intent expires_at precedes due_at")
+        goal_text = step.goal_text
         stem = canonical_digest(goal_text)[:20]
         suffix = 2
         while self.core.get_record(f"intent:agent:{stem}") is not None:
@@ -1123,15 +1175,15 @@ class Coordinator:
             created_at=self.clock.now_rfc3339(),
             creator_ref=RecordRef(id=self.identity.principal_ref.id, revision=1),
             goal_fragment_ref=RecordRef(id=fragment.id, revision=fragment.revision),
-            purpose_class=purpose_class,
+            purpose_class=step.purpose_class,
             observed_trigger_refs=(),
             endorsement_revision=1,
             producer_coverage_ref=None,
             runtime_task_root_ids=(f"root:{canonical_digest(goal_text)[:12]}",),
             parent_work_ref=None,
-            allowed_destination_refs=self.capability.allowed_destination_ids,
-            due_at=None,
-            expires_at=None,
+            allowed_destination_refs=allowed_destinations,
+            due_at=step.due_at,
+            expires_at=step.expires_at,
             state=IntentState.OPEN,
         )
         # Crash-atomic mint (yp): same one-transaction shape as the

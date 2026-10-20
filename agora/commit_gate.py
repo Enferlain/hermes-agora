@@ -54,6 +54,7 @@ from agora.contracts import (
     ContextSnapshot,
     DecisionKind,
     Disposition,
+    EffectKind,
     EffectPlan,
     Intent,
     MemoryView,
@@ -611,8 +612,19 @@ class CommitGate:
         rendered = self.core.get_payload(effect.rendered_payload_ref)
         if rendered is None:
             raise GateRejection(ReasonCode.CONFLICT, "rendered payload missing")
-        if canonical_digest(json.loads(rendered)) != effect.payload_digest:
+        rendered_value = json.loads(rendered)
+        if canonical_digest(rendered_value) != effect.payload_digest:
             raise GateRejection(ReasonCode.CONFLICT, "payload digest mismatch")
+        if effect.kind == EffectKind.SEND_MESSAGE:
+            text = rendered_value.get("text")
+            if isinstance(text, str) and len(text) > context.max_message_chars:
+                # The gate is the effect monopoly, so the hard limit binds
+                # the RENDERED bytes here too, not only at draft rendering —
+                # a payload that reaches the gate with its digest intact
+                # still cannot smuggle length past it (bead xek-12).
+                raise GateRejection(
+                    ReasonCode.POLICY_FORBIDDEN, "rendered message exceeds max_message_chars"
+                )
 
     def _snapshot(self, plan: EffectPlan) -> ContextSnapshot | None:
         snapshot = self.core.get_record(plan.snapshot_ref.id, plan.snapshot_ref.revision)

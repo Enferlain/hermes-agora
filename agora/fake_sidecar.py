@@ -8,6 +8,7 @@ owns identity, memory, or policy decisions.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import uuid
@@ -21,6 +22,7 @@ from agora.contracts import (
     AuthorizationStatus,
     CapabilityEnvelope,
     CommitAuthorization,
+    ContentFragment,
     ContextSnapshot,
     DeliveryReceipt,
     DeliveryState,
@@ -472,6 +474,12 @@ class FakeSidecar:
             current_target = self.core.current_ref(effect.target_ref.id)
             if current_target is None or current_target.revision != effect.target_ref.revision:
                 return ReasonCode.TARGET_CHANGED
+            if self._target_bytes_changed(effect):
+                # Purge zeroes payload bytes at the SAME revision, which the
+                # revision check above cannot see: the reaction's rendered
+                # bytes bind the target's content digest, so the target must
+                # still hash to exactly what was rendered (bead xek-11).
+                return ReasonCode.TARGET_CHANGED
         capability = self.core.get_record(authorization.capability_ref.id)
         if (
             not isinstance(capability, CapabilityEnvelope)
@@ -480,6 +488,22 @@ class FakeSidecar:
         ):
             return ReasonCode.CAPABILITY_INVALID
         return self._reserve_release(connection, effect=effect, capability=capability)
+
+    def _target_bytes_changed(self, effect: Effect) -> bool:
+        """Whether the reaction target's current bytes still hash to the
+        content digest bound in the effect's rendered payload. A purged or
+        missing payload, or a target that is no longer a content fragment,
+        counts as changed (xek-11: purge zeroes bytes at the same revision)."""
+        assert effect.target_ref is not None
+        fragment = self.core.get_record(effect.target_ref.id, effect.target_ref.revision)
+        if not isinstance(fragment, ContentFragment):
+            return True
+        data = self.core.get_payload(fragment.payload_ref)
+        rendered = self.core.get_payload(effect.rendered_payload_ref)
+        if data is None or rendered is None:
+            return True
+        bound_digest = json.loads(rendered).get("target_content_digest")
+        return hashlib.sha256(data.encode("utf-8")).hexdigest() != bound_digest
 
     def _reserve_release(
         self,

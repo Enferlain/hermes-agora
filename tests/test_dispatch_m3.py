@@ -21,6 +21,7 @@ from agora.contracts import (
     CapabilityEnvelope,
     Commitment,
     CommitmentStrength,
+    ContentFragment,
     DecisionKind,
     Disposition,
     Effect,
@@ -88,7 +89,14 @@ def _act_plan(
             destination_id="room:public", text=text, reply_target_ref=None
         )
     else:
-        data = stack.core.get_payload(f"payload:{target_ref.id}") or ""
+        # bind the digest from the TARGET FRAGMENT's own payload (the
+        # coordinator's _target_content_digest rule), not a guessed id —
+        # the purge-vs-dispatch regression depends on the binding being
+        # live (review finding on xek).
+        fragment = stack.core.get_record(target_ref.id, target_ref.revision)
+        assert isinstance(fragment, ContentFragment)
+        data = stack.core.get_payload(fragment.payload_ref)
+        assert data is not None, "reaction target payload must be live to bind"
         rendered = render_add_reaction(
             destination_id="room:public",
             target_ref=target_ref,
@@ -974,3 +982,49 @@ def test_conflicting_bytes_for_same_revision_is_a_typed_conflict(tmp_path: Path)
         )
     assert excinfo.value.code == ReasonCode.CONFLICT  # digest binding refuses
     assert len(_world_rows(stack)) == 1
+
+
+def test_purged_target_holds_at_dispatch_revalidation(tmp_path: Path) -> None:
+    """Bead xek-11: purge zeroes target bytes at the SAME revision, which
+    the revision-only TARGET_CHANGED check cannot see — revalidation now
+    also verifies the target still hashes to the content digest bound in
+    the rendered bytes, so a purged target holds with TARGET_CHANGED and
+    nothing sends."""
+    from tests.fixtures_review import feed_event
+
+    stack = ReviewStack(tmp_path)
+    feed_event(stack)
+    intent = make_intent(stack, "intent:purge-hold")
+    snapshot = review_snapshot(stack, "call:purge-hold", intent)
+    target = RecordRef(id="fragment:evt:1", revision=1)
+    plan, rendered = _act_plan(
+        stack, "purge-hold", snapshot=snapshot, intent_ref=intent, target_ref=target
+    )
+    authorization = _authorize(stack, plan)
+
+    stack.core._conn.execute(
+        "UPDATE core_payloads SET status = 'PURGED' WHERE payload_id = 'payload:evt:1'"
+    )
+
+    with pytest.raises(SidecarError) as excinfo:
+        _submit(stack, authorization, plan, rendered)
+    assert excinfo.value.code == ReasonCode.TARGET_CHANGED
+    assert stack.transport.outbox_state(plan.effects[0].logical_effect_id) == "HELD"
+    assert _world_rows(stack) == []
+
+
+def test_gate_enforces_message_length_on_rendered_bytes(tmp_path: Path) -> None:
+    """Bead xek-12: the hard length limit binds at the gate too (the
+    effect monopoly), on the rendered bytes — a payload whose digest is
+    intact cannot smuggle length past draft rendering."""
+    from tests.fixtures_review import gate_context
+
+    stack = ReviewStack(tmp_path)
+    intent = make_intent(stack, "intent:length")
+    snapshot = review_snapshot(stack, "call:length", intent)
+    plan, _rendered = _act_plan(
+        stack, "length", snapshot=snapshot, intent_ref=intent, text="x" * 2500
+    )
+    decision = stack.gate.evaluate(plan, context=gate_context(stack))
+    assert decision.kind == DecisionKind.DENIED
+    assert ReasonCode.POLICY_FORBIDDEN in decision.reason_codes
